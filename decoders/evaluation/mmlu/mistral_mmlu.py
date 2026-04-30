@@ -10,6 +10,7 @@ See argparse section for all argument options.
 """
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoModel
+from datasets import load_dataset
 import torch
 import argparse
 import sys
@@ -18,9 +19,9 @@ import wandb
 from evaluation_utils import MMLUDataset, collate_fn, setup_seed, evaluate_model
 from tokenizers.models import BPE, WordPiece
 
-HOME_PATH = "/mnt/nas_home/dmf45/dynamic_tokenization"
+from pathlib import Path
+HOME_PATH = str(Path(__file__).resolve().parents[3])
 sys.path.insert(0, HOME_PATH)
-from tokenizations.static_tokenizations import tokenize
 from tokenizations.tokenization_utils import DatasetEncoder
 from tokenizations.hypernet_cache import LRU_Cache
 
@@ -40,6 +41,7 @@ def main():
     parser.add_argument("--vocab_1M", action="store_true", help="Use tokenizer with 1M vocab and HN embeddings")
     parser.add_argument("--multiple_merges_exp", action="store_true", help="Use HN embeddings with different perecentages of sequence reduction")
     parser.add_argument("--use_original_emb_for_choices", action="store_true", help="Use original embeddings for A, B, C, D choices")
+    parser.add_argument("--merges", type=int, default=1000, help="Number of BPE merges for dynamic_bpe (ignored for other exp_types)")
 
     args = parser.parse_args()
     setup_seed(1234)
@@ -80,7 +82,7 @@ def main():
             unk_token = tokenizer.unk_token if tokenizer.unk_token is not None else tokenizer.eos_token
             tokenizer._tokenizer.model = WordPiece(vocab, unk_token=unk_token)
             tokenizer._tokenizer.model.continuing_subword_prefix = ""
-        langs = [x.strip() for x in open("artifacts/26l.txt")]
+        langs = [x.strip() for x in open(f"{HOME_PATH}/data/artifacts/26l.txt")]
         lang_index = torch.tensor(langs.index(args.lng), dtype=torch.int32).to(device)
         base_model = AutoModelForCausalLM.from_pretrained(model_name)
         source_embeddings = torch.concatenate([
@@ -109,8 +111,8 @@ def main():
         "abstract_algebra", "high_school_government_and_politics", "anatomy", "astronomy", "business_ethics", "clinical_knowledge", "college_biology", "college_chemistry", "college_computer_science", "college_mathematics", "college_medicine", "college_physics", "computer_security", "conceptual_physics", "econometrics", "electrical_engineering", "elementary_mathematics", "formal_logic", "global_facts", "high_school_biology", "high_school_chemistry", "high_school_computer_science", "high_school_european_history", "high_school_geography", "high_school_macroeconomics", "high_school_mathematics", "high_school_microeconomics", "high_school_physics", "high_school_psychology", "high_school_statistics", "high_school_us_history", "high_school_world_history", "human_aging", "human_sexuality", "international_law", "jurisprudence", "logical_fallacies", "machine_learning", "management", "marketing", "medical_genetics", "miscellaneous", "moral_disputes", "moral_scenarios", "nutrition", "philosophy", "prehistory", "professional_accounting", "professional_law", "professional_medicine", "professional_psychology", "public_relations", "security_studies", "sociology", "us_foreign_policy", "virology", "world_religions",
     ]
 
-    dataset = load_dataset("hails/mmlu_no_train", args.ds_subject)["test"]
-    validation_dataset = load_dataset("hails/mmlu_no_train", args.ds_subject)["validation"]
+    dataset = load_dataset("cais/mmlu", args.ds_subject)["test"]
+    validation_dataset = load_dataset("cais/mmlu", args.ds_subject)["validation"]
     per_subject_validation_datasets = {}
     if args.same_domain_shot:
         max_length = max(8192, args.max_len)

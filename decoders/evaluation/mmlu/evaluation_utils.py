@@ -200,4 +200,239 @@ def setup_seed(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed) 
+    torch.cuda.manual_seed_all(seed)
+
+
+def evaluate_model(
+    dataloader,
+    model,
+    tokenizer,
+    args,
+    base_model=None,
+    hypernet=None,
+    lang_index=None,
+    source_embeddings=None,
+    datasetEncoder=None,
+    inout_1M_embeddings=None,
+    subjects=None,
+):
+    """
+    Score MMLU by picking the choice (A/B/C/D) with the highest score at the
+    last prompt token. Two paths:
+      - exp_type == "plain": tokenize with Mistral's tokenizer, take logits at
+        the last position, argmax over A/B/C/D token IDs.
+      - exp_type in {"original_tk_hypernet", "lp_tk_hypernet", "dynamic_bpe"}:
+        use the hypernet to produce input embeddings for prompt tokens (via
+        DatasetEncoder) and output embeddings for the four letter tokens. Take
+        the model's last hidden state, dot it against each letter's output
+        embedding, argmax.
+    """
+    eval_type = args.eval_type.lower()
+    if eval_type not in ("original", "origianl"):
+        raise NotImplementedError(
+            f"evaluate_model only supports eval_type='original'; got {args.eval_type!r}."
+        )
+
+    if args.exp_type == "plain":
+        return _evaluate_plain(dataloader, model, tokenizer, args)
+    if args.exp_type in ("original_tk_hypernet", "lp_tk_hypernet", "dynamic_bpe"):
+        return _evaluate_hypernet(
+            dataloader=dataloader,
+            model=model,
+            tokenizer=tokenizer,
+            args=args,
+            hypernet=hypernet,
+            lang_index=lang_index,
+            source_embeddings=source_embeddings,
+            datasetEncoder=datasetEncoder,
+        )
+    raise NotImplementedError(
+        f"evaluate_model: exp_type={args.exp_type!r} is not implemented."
+    )
+
+
+def _letter_token_id(tokenizer, letter: str) -> int:
+    """Single-token ID for ' <letter>' (preferred) or '<letter>'."""
+    for cand in (f" {letter}", letter):
+        ids = tokenizer.encode(cand, add_special_tokens=False)
+        if len(ids) == 1:
+            return ids[0]
+    return tokenizer.encode(f" {letter}", add_special_tokens=False)[0]
+
+
+def _print_and_log(args, total_correct, total_seen, correct_per_subject, total_per_subject):
+    import wandb
+    overall_acc = total_correct / max(total_seen, 1)
+    per_subject_acc = {
+        s: correct_per_subject[s] / total_per_subject[s] for s in total_per_subject
+    }
+    print(f"\nOverall MMLU accuracy: {overall_acc:.4f} ({total_correct}/{total_seen})")
+    for s in sorted(per_subject_acc):
+        print(
+            f"  {s}: {per_subject_acc[s]:.4f} "
+            f"({correct_per_subject[s]}/{total_per_subject[s]})"
+        )
+    if not args.no_wandb:
+        wandb.log(
+            {
+                "mmlu/overall_accuracy": overall_acc,
+                "mmlu/total_correct": total_correct,
+                "mmlu/total_seen": total_seen,
+                **{f"mmlu/per_subject/{s}": v for s, v in per_subject_acc.items()},
+            }
+        )
+    return overall_acc, per_subject_acc
+
+
+def _evaluate_plain(dataloader, model, tokenizer, args):
+    from collections import defaultdict
+
+    device = next(model.parameters()).device
+    model.eval()
+
+    prev_padding_side = tokenizer.padding_side
+    tokenizer.padding_side = "left"
+
+    choice_token_ids = torch.tensor(
+        [_letter_token_id(tokenizer, L) for L in ("A", "B", "C", "D")], device=device
+    )
+
+    correct_per_subject = defaultdict(int)
+    total_per_subject = defaultdict(int)
+    total_correct = 0
+    total_seen = 0
+
+    try:
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(dataloader):
+                prompts, _, gold_indices, _, _, subjects_in_batch = batch
+
+                enc = tokenizer(
+                    prompts,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=args.max_len,
+                ).to(device)
+
+                logits = model(**enc).logits
+                last_logits = logits[:, -1, :]
+                choice_logits = last_logits[:, choice_token_ids]
+                preds = choice_logits.argmax(dim=-1).tolist()
+
+                for pred, gold, subj in zip(preds, gold_indices, subjects_in_batch):
+                    correct = int(pred == gold)
+                    correct_per_subject[subj] += correct
+                    total_per_subject[subj] += 1
+                    total_correct += correct
+                    total_seen += 1
+
+                if batch_idx % 50 == 0:
+                    running = total_correct / max(total_seen, 1)
+                    print(
+                        f"[batch {batch_idx}] running acc = {running:.4f} "
+                        f"({total_correct}/{total_seen})",
+                        flush=True,
+                    )
+    finally:
+        tokenizer.padding_side = prev_padding_side
+
+    return _print_and_log(args, total_correct, total_seen, correct_per_subject, total_per_subject)
+
+
+def _evaluate_hypernet(
+    dataloader,
+    model,
+    tokenizer,
+    args,
+    hypernet,
+    lang_index,
+    source_embeddings,
+    datasetEncoder,
+):
+    """
+    Hypernet-aware MMLU eval. Works for original_tk_hypernet, lp_tk_hypernet,
+    and dynamic_bpe — they only differ in how DatasetEncoder tokenizes the
+    prompt. Output-side scoring is the same: dot the model's last hidden state
+    against hypernet-predicted output embeddings for ' A', ' B', ' C', ' D'.
+    """
+    from collections import defaultdict
+    from transformers import AutoTokenizer
+
+    device = next(model.parameters()).device
+    model.eval()
+
+    # Use the live model's embeddings for special-token fallback (already on device, bf16).
+    base_input_emb = model.get_input_embeddings().weight.data
+    base_output_emb = model.get_output_embeddings().weight.data
+
+    if args.use_original_emb_for_choices:
+        # Mistral's native output embeddings for ' A', ' B', ' C', ' D'.
+        # Use a fresh original tokenizer in case `tokenizer` was swapped (lp_tk_hypernet).
+        original_tok = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
+        ids = [_letter_token_id(original_tok, L) for L in ("A", "B", "C", "D")]
+        choice_output_emb = base_output_emb[torch.tensor(ids, device=device)]
+    else:
+        # zett expects byte-level (BBPE) surface forms — space encodes to 'Ġ'.
+        # Convert " A"/" B"/" C"/" D" into BBPE form before handing to the hypernet.
+        from zett.utils import CHARS_TO_BYTES
+        bytes_to_chars = {v: k for k, v in CHARS_TO_BYTES.items()}
+        def _to_bbpe(s: str) -> str:
+            return "".join(bytes_to_chars[b] for b in s.encode("utf-8"))
+        choice_tokens_bbpe = [_to_bbpe(s) for s in (" A", " B", " C", " D")]
+
+        _, choice_output_emb = get_hn_embeddings_for_tokens(
+            tokens=choice_tokens_bbpe,
+            tokenizer=tokenizer,
+            lang_index=lang_index,
+            hypernet=hypernet,
+            source_embeddings=source_embeddings,
+            device=device,
+            base_input_embeddings=base_input_emb,
+            base_output_embeddings=base_output_emb,
+        )
+
+    choice_output_emb = choice_output_emb.to(torch.bfloat16)
+
+    correct_per_subject = defaultdict(int)
+    total_per_subject = defaultdict(int)
+    total_correct = 0
+    total_seen = 0
+
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(dataloader):
+            prompts, _, gold_indices, _, _, subjects_in_batch = batch
+
+            encoded = datasetEncoder.encode_examples_unique_tokens_lru(
+                examples=list(prompts),
+                max_length=args.max_len,
+                merges=args.merges,
+                task="mmlu",
+            )
+            inputs_embeds = encoded["inputs_embeds"].to(torch.bfloat16)
+            attention_mask = encoded["attention_mask"]
+
+            outputs = model.model(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+            )
+            last_hidden = outputs.last_hidden_state[:, -1, :]
+            scores = last_hidden.float() @ choice_output_emb.float().T
+            preds = scores.argmax(dim=-1).tolist()
+
+            for pred, gold, subj in zip(preds, gold_indices, subjects_in_batch):
+                correct = int(pred == gold)
+                correct_per_subject[subj] += correct
+                total_per_subject[subj] += 1
+                total_correct += correct
+                total_seen += 1
+
+            if batch_idx % 50 == 0:
+                running = total_correct / max(total_seen, 1)
+                print(
+                    f"[batch {batch_idx}] running acc = {running:.4f} "
+                    f"({total_correct}/{total_seen})",
+                    flush=True,
+                )
+
+    return _print_and_log(args, total_correct, total_seen, correct_per_subject, total_per_subject)
