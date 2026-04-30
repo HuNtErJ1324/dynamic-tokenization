@@ -23,7 +23,6 @@ def process_prompts_with_split(model, tokenizer, prompts, split_fn, entropy_thre
     probs = torch.softmax(logits, dim=-1)
     # Move to CPU immediately to free up GPU VRAM and perform string ops
     entropy_matrix = -(probs * torch.log(probs + 1e-9)).sum(dim=-1).cpu()
-    print(f'finished forward pass')
     # --- PASS 2: APPLY SPLIT ---
     processed_prompts = []
     

@@ -42,6 +42,7 @@ def main():
     parser.add_argument("--multiple_merges_exp", action="store_true", help="Use HN embeddings with different perecentages of sequence reduction")
     parser.add_argument("--use_original_emb_for_choices", action="store_true", help="Use original embeddings for A, B, C, D choices")
     parser.add_argument("--merges", type=int, default=1000, help="Number of BPE merges for dynamic_bpe (ignored for other exp_types)")
+    parser.add_argument("--split", type=bool, default=False, help="Enable entropy-based prompt re-tokenizing")
 
     args = parser.parse_args()
     setup_seed(1234)
