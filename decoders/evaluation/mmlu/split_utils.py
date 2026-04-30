@@ -33,7 +33,7 @@ def process_prompts_with_split(model, tokenizer, prompts, split_fn, entropy_thre
         # Check logit at position j, split token at position j if needed
         for j in range(1, len(original_ids)):
             next_token_id = original_ids[j]
-            token_entropy = entropy_matrix[i, j].item()
+            token_entropy = entropy_matrix[i, j].item()  # this looks at the entropy of predicting the next token
             if token_entropy > entropy_threshold:
                 # Apply your modular splitting strategy
                 fragments = split_fn(tokenizer, next_token_id)
