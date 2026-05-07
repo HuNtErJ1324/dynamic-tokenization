@@ -14,6 +14,7 @@ import random
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+from split_utils import process_prompts_with_split, minimal_split
 
 from zett.utils import get_surface_form_matrix
 
@@ -306,14 +307,29 @@ def _evaluate_plain(dataloader, model, tokenizer, args):
         with torch.no_grad():
             for batch_idx, batch in enumerate(dataloader):
                 prompts, _, gold_indices, _, _, subjects_in_batch = batch
-
-                enc = tokenizer(
-                    prompts,
-                    return_tensors="pt",
-                    padding=True,
-                    truncation=True,
-                    max_length=args.max_len,
-                ).to(device)
+                
+                if (args.split):
+                    processed_input_ids_list = process_prompts_with_split(
+                        model=model,
+                        tokenizer=tokenizer,
+                        prompts=prompts,
+                        split_fn=minimal_split, # Or whichever split_fn you chose
+                        entropy_threshold=4.0,
+                        device=device
+                    )
+                    enc = tokenizer.pad(
+                        {"input_ids": [torch.tensor(ids) for ids in processed_input_ids_list]},
+                        padding=True,
+                        return_tensors="pt"
+                    ).to(device)
+                else:
+                    enc = tokenizer(
+                        prompts,
+                        return_tensors="pt",
+                        padding=True,
+                        truncation=True,
+                        max_length=args.max_len,
+                    ).to(device)
 
                 logits = model(**enc).logits
                 last_logits = logits[:, -1, :]
