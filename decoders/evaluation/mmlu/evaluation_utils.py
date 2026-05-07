@@ -362,9 +362,13 @@ def _evaluate_hypernet(
     device = next(model.parameters()).device
     model.eval()
 
-    # Use the live model's embeddings for special-token fallback (already on device, bf16).
-    base_input_emb = model.get_input_embeddings().weight.data
-    base_output_emb = model.get_output_embeddings().weight.data
+    # source_embeddings is the fp32 (V, 2H) concat of base input + output embeddings on GPU.
+    # Slice it back into the two halves so we pass fp32 to the hypernet (which outputs fp32);
+    # using the live model's bf16 embeddings here triggers a dtype mismatch in the
+    # special-token assignment inside get_hn_embeddings_for_tokens.
+    H = model.config.hidden_size
+    base_input_emb = source_embeddings[:, :H]
+    base_output_emb = source_embeddings[:, H:]
 
     if args.use_original_emb_for_choices:
         # Mistral's native output embeddings for ' A', ' B', ' C', ' D'.
