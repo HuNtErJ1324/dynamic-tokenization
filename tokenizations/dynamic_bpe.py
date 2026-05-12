@@ -24,7 +24,10 @@ class Dynamic_BPE:
 
     Args:
         tokenizer: The base tokenizer object.
-        tokenizer_boundary (str): Boundary for merging subwords ('pretokens', 'words', 'sentence', etc.).
+        tokenizer_boundary (str): Boundary for merging subwords. One of:
+            'pretokens' (default, single pre-token), 'word' (WhitespaceSplit), 'word_hyphen',
+            'sentence' (no special-token crossing), or 'superbpe' (SuperBPE-style: allow
+            cross-word merges; only special tokens / "ĊĊ" remain disallowed).
     """
     def __init__(self, tokenizer: Any, tokenizer_boundary: str = "pretokens"):
         self.tokenizer = tokenizer
@@ -48,10 +51,16 @@ class Dynamic_BPE:
         ner: bool = False,
         nli: bool = False,
         mmlu: bool = False,
+        transition_point: int = 0,
     ):
         """
         Tokenize a batch of examples using dynamic BPE with a specified number of merges.
         Returns tokenized sequences, unique tokens, sequence lengths, and (optionally) word ids.
+
+        If ``transition_point > 0`` (SuperBPE-style two-stage merging), the first
+        ``transition_point`` merges are forced to use the strict ``"pretokens"`` boundary
+        regardless of ``self.tokenizer_boundary``; subsequent merges fall back to
+        ``self.tokenizer_boundary`` (typically ``"superbpe"``).
         """
         unique_tokens_original, batch_tokens, batch_word_tokens, batch_word_ids = (
             self.tokenize_base_case(
@@ -67,7 +76,12 @@ class Dynamic_BPE:
         batch_seq_lengths = []
         total_merges = 0
         while total_merges < max_nr_merges:
-            best_pair = self.get_most_frequent_pair(batch_tokens=batch_tokens)
+            active_boundary = (
+                "pretokens" if total_merges < transition_point else self.tokenizer_boundary
+            )
+            best_pair = self.get_most_frequent_pair(
+                batch_tokens=batch_tokens, active_boundary=active_boundary
+            )
             if best_pair == "":
                 print(f"Early exit, {total_merges} out of {max_nr_merges}")
                 break
@@ -99,10 +113,11 @@ class Dynamic_BPE:
         ner: bool = False,
         nli: bool = False,
         mmlu: bool = False,
+        transition_point: int = 0,
     ):
         """
         Analyze the distribution of merges to average sequence lengths for a dataset batch.
-        Populates self.merges2seqLen.
+        Populates self.merges2seqLen. See ``tokenize_batch`` for ``transition_point`` semantics.
         """
         import copy
         _, batch_tokens, _, _ = self.tokenize_base_case(
@@ -119,7 +134,12 @@ class Dynamic_BPE:
         for tokenised_text in batch_tokens:
             self.merges2seqLen[total_merges] += len(tokenised_text)
         while total_merges < max_nr_merges:
-            best_pair = self.get_most_frequent_pair(batch_tokens=batch_tokens)
+            active_boundary = (
+                "pretokens" if total_merges < transition_point else self.tokenizer_boundary
+            )
+            best_pair = self.get_most_frequent_pair(
+                batch_tokens=batch_tokens, active_boundary=active_boundary
+            )
             if best_pair == "":
                 for i in range(total_merges + 1, max_nr_merges):
                     if i not in self.merges2seqLen:
@@ -136,7 +156,9 @@ class Dynamic_BPE:
             for tokenised_text in batch_tokens:
                 self.merges2seqLen[total_merges] += len(tokenised_text)
 
-    def get_merges2seqlen_for_dataset(self, dataset, batch_size: int = 32) -> None:
+    def get_merges2seqlen_for_dataset(
+        self, dataset, batch_size: int = 32, transition_point: int = 0
+    ) -> None:
         """
         Compute and save the mapping from number of merges to average sequence length for a dataset.
         """
@@ -153,6 +175,7 @@ class Dynamic_BPE:
                 ner=False,
                 nli=False,
                 mmlu=True,
+                transition_point=transition_point,
             )
         for merge in self.merges2seqLen:
             self.merges2seqLen[merge] = self.merges2seqLen[merge] / len(dataset)
@@ -163,11 +186,29 @@ class Dynamic_BPE:
     # === Helper methods ===
 
     @lru_cache(maxsize=None)
-    def is_valid_pair(self, pair: Tuple[str, str]) -> bool:
+    def is_valid_pair(self, pair: Tuple[str, str], boundary: str) -> bool:
         """
-        Check if a pair of tokens can be merged, according to the current boundary and special token rules.
+        Check if a pair of tokens can be merged under ``boundary``.
+
+        ``boundary`` is taken as an explicit argument (not read from ``self``) so that
+        callers can override it per-merge — e.g., a two-stage SuperBPE schedule that
+        switches from ``"pretokens"`` to ``"superbpe"`` after a transition point.
+        Including it in the signature also keeps the lru_cache correct when the active
+        boundary changes within a single tokenizer instance.
         """
         token1, token2 = pair[0], pair[1]
+        spacelike_char_representations = "ĉĠĊ"
+
+        if boundary == "superbpe":
+            # SuperBPE: explicitly allow merges across whitespace. We still refuse
+            # merges that would absorb a special token, and keep the "ĊĊ" exception
+            # for consistency with the Mistral pretokenizer's split behavior.
+            if token1 in self.special_token_map or token2 in self.special_token_map:
+                return False
+            if token1 + token2 == "ĊĊ":
+                return False
+            return True
+
         # merging can be problematic if the pair is not a valid utf-8 string
         # in particular, if a full word is followed by something which is not valid utf-8
         # we would end up merging the two, even though we do not want to merge across words
@@ -176,7 +217,6 @@ class Dynamic_BPE:
         # somewhere in the middle, we do not merge them, except if all of them are spacelike (to allow compressing consecutive whitespace)
         # since in a peculiar edge case the Mistral pretokenizer also splits the whitespace in "x\n\ny" into two tokens (but not in "\n\n")
         # we also disallow merging "\n\n" (i.e. ĊĊ) for consistency with the pretokenizer
-        spacelike_char_representations = "ĉĠĊ"
         if any(c in (token1 + token2)[1:] for c in spacelike_char_representations) and (
             token1 + token2 == "ĊĊ"
             or not all(c in spacelike_char_representations for c in (token1 + token2))
@@ -184,7 +224,7 @@ class Dynamic_BPE:
             return False
 
         try:
-            if self.tokenizer_boundary == "sentence":
+            if boundary == "sentence":
                 return (
                     token1 not in self.special_token_map
                     and token2 not in self.special_token_map
@@ -193,20 +233,20 @@ class Dynamic_BPE:
             b = [CHARS_TO_BYTES[c] for c in token1 + token2]
             string = bytes(b).decode("utf-8")
 
-            if self.tokenizer_boundary == "pretokens":
+            if boundary == "pretokens":
                 return (
                     len(
                         self.tokenizer._tokenizer.pre_tokenizer.pre_tokenize_str(string)
                     )
                     == 1
                 )
-            elif self.tokenizer_boundary == "word":
+            elif boundary == "word":
                 return (
                     len(pre_tokenizers.WhitespaceSplit().pre_tokenize_str(string)) == 1
                     and token1 not in self.special_token_map
                     and token2 not in self.special_token_map
                 )
-            elif self.tokenizer_boundary == "word_hyphen":
+            elif boundary == "word_hyphen":
                 cond1 = (
                     len(pre_tokenizers.WhitespaceSplit().pre_tokenize_str(string)) == 1
                     and token1 not in self.special_token_map
@@ -223,15 +263,27 @@ class Dynamic_BPE:
             # this chunk of bytes is not a valid string, so we can't test it
             return True
 
-    def get_most_frequent_pair(self, batch_tokens: List[List[str]], check_valid: bool = True) -> Any:
+    def get_most_frequent_pair(
+        self,
+        batch_tokens: List[List[str]],
+        check_valid: bool = True,
+        active_boundary: str = None,
+    ) -> Any:
         """
         Find the most frequent valid pair of tokens in the batch.
+
+        ``active_boundary`` overrides ``self.tokenizer_boundary`` for this call; pass
+        ``"pretokens"`` during the warm-up phase of a SuperBPE two-stage schedule.
         """
+        if active_boundary is None:
+            active_boundary = self.tokenizer_boundary
         pair_freqs = Counter()
         for token_sequence in batch_tokens:
             pairs = zip(token_sequence, token_sequence[1:])
             if check_valid:
-                pairs = (pair for pair in pairs if self.is_valid_pair(pair))
+                pairs = (
+                    pair for pair in pairs if self.is_valid_pair(pair, active_boundary)
+                )
             pair_freqs.update(pairs)
 
         if pair_freqs:

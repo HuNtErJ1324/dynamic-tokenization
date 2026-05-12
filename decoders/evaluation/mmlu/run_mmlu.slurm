@@ -51,8 +51,13 @@ cd "$PROJECT_ROOT/decoders/evaluation/mmlu"
 EXP_TYPE="${EXP_TYPE:-plain}"
 MERGES="${MERGES:-1000}"     # only used by dynamic_bpe
 BATCH_SIZE="${BATCH_SIZE:-4}"
+# Merge boundary for dynamic_bpe: pretokens | word | word_hyphen | sentence | superbpe
+BOUNDARY="${BOUNDARY:-pretokens}"
+# SuperBPE two-stage schedule: first N merges use strict 'pretokens' boundary,
+# remainder use $BOUNDARY. 0 disables the warm-up phase.
+TRANSITION_POINT="${TRANSITION_POINT:-0}"
 
-echo "Running MMLU eval: exp_type=$EXP_TYPE, merges=$MERGES, batch_size=$BATCH_SIZE"
+echo "Running MMLU eval: exp_type=$EXP_TYPE, merges=$MERGES, batch_size=$BATCH_SIZE, boundary=$BOUNDARY, transition_point=$TRANSITION_POINT"
 
 srun python mistral_mmlu.py \
     --exp_type "$EXP_TYPE" \
@@ -60,5 +65,7 @@ srun python mistral_mmlu.py \
     --ds_subject all \
     --batch_size "$BATCH_SIZE" \
     --merges "$MERGES" \
+    --bpe_tokenizer_boundary "$BOUNDARY" \
+    --transition_point "$TRANSITION_POINT" \
     --five_shot \
     --no_wandb

@@ -71,3 +71,4 @@ checkpoints/
 
 # Claude Code session metadata
 .claude/
+.gitignore
