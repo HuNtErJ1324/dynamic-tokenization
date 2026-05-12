@@ -108,6 +108,24 @@ print("Predicted in-emb shape:", pred_in.shape)
 print("Predicted out-emb shape:", pred_out.shape)
 ```
 
+## SuperBPE-Style Cross-Word Merges (`tokenizer_boundary='superbpe'`)
+
+Inspired by [SuperBPE (Liu et al., 2025)](https://arxiv.org/abs/2503.13423), `Dynamic_BPE` can merge tokens *past* word boundaries. Pass `tokenizer_boundary='superbpe'` to lift the whitespace barrier; the special-token gate (`<s>`, `</s>`) is still enforced.
+
+A `transition_point` argument on `tokenize_batch` reproduces SuperBPE's two-stage schedule: the first `transition_point` merges respect the strict `'pretokens'` boundary (so subwords first compose into full words), and the remaining merges allow cross-word merges (full words compose into phrases). `transition_point=0` enables cross-word merges from merge #1.
+
+```python
+dynamic_bpe = Dynamic_BPE(tokenizer=hypernet_tokenizer, tokenizer_boundary='superbpe')
+dynamic_tokens, _, _, _ = dynamic_bpe.tokenize_batch(
+    batch_examples=examples,
+    max_nr_merges=20,
+    transition_point=10,  # first 10 merges within-word; merges 11-20 may span words
+    mlm=True,
+)
+# Once the transition point is exceeded, expect tokens that span words,
+# e.g. 'ĠmRNAĠstability' rather than the separate 'ĠmRNA' + 'Ġstability'.
+```
+
 ## Reference
 
 If you use this code, please cite:

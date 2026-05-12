@@ -42,6 +42,19 @@ def main():
     parser.add_argument("--multiple_merges_exp", action="store_true", help="Use HN embeddings with different perecentages of sequence reduction")
     parser.add_argument("--use_original_emb_for_choices", action="store_true", help="Use original embeddings for A, B, C, D choices")
     parser.add_argument("--merges", type=int, default=1000, help="Number of BPE merges for dynamic_bpe (ignored for other exp_types)")
+    parser.add_argument(
+        "--bpe_tokenizer_boundary",
+        type=str,
+        default="pretokens",
+        help="Merge boundary for dynamic_bpe: pretokens, word, word_hyphen, sentence, superbpe.",
+    )
+    parser.add_argument(
+        "--transition_point",
+        type=int,
+        default=0,
+        help="SuperBPE two-stage schedule: first N merges use strict 'pretokens' boundary, "
+             "remainder use --bpe_tokenizer_boundary. 0 disables the warm-up phase.",
+    )
 
     args = parser.parse_args()
     setup_seed(1234)
@@ -104,7 +117,8 @@ def main():
             embeddings_cache=embeddings_cache,
             exp_type=args.exp_type,
             collect_extra_data=True,
-            bpe_tokenizer_boundary="pretokens",
+            bpe_tokenizer_boundary=args.bpe_tokenizer_boundary,
+            transition_point=args.transition_point,
         )
 
     subjects = [
