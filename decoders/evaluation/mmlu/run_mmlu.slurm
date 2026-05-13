@@ -59,6 +59,10 @@ TRANSITION_POINT="${TRANSITION_POINT:-0}"
 
 echo "Running MMLU eval: exp_type=$EXP_TYPE, merges=$MERGES, batch_size=$BATCH_SIZE, boundary=$BOUNDARY, transition_point=$TRANSITION_POINT"
 
+# --- latency tracking --------------------------------------------------------
+START_EPOCH=$(date +%s)
+echo "[slurm-latency] start_time=$(date -Iseconds) (epoch=$START_EPOCH)"
+
 srun python mistral_mmlu.py \
     --exp_type "$EXP_TYPE" \
     --eval_type original \
@@ -69,3 +73,10 @@ srun python mistral_mmlu.py \
     --transition_point "$TRANSITION_POINT" \
     --five_shot \
     --no_wandb
+
+END_EPOCH=$(date +%s)
+ELAPSED=$((END_EPOCH - START_EPOCH))
+printf '[slurm-latency] end_time=%s (epoch=%s)\n' "$(date -Iseconds)" "$END_EPOCH"
+printf '[slurm-latency] total_elapsed=%ss (%dh %dm %ds) exp_type=%s merges=%s batch_size=%s\n' \
+    "$ELAPSED" $((ELAPSED/3600)) $(((ELAPSED%3600)/60)) $((ELAPSED%60)) \
+    "$EXP_TYPE" "$MERGES" "$BATCH_SIZE"
