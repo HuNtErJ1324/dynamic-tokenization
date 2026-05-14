@@ -1,11 +1,10 @@
 """
-Utility functions and classes for MMLU evaluation.
+Utility functions and classes for KMMLU (Korean MMLU) evaluation.
 
-Includes:
-- MMLUDataset: PyTorch Dataset for MMLU with 0-shot and 5-shot prompt formatting
-- collate_fn: DataLoader collate function
-- setup_seed: Seed setup for reproducibility
-- Generate token embeddings on-the-fly. This is used to embed tokens during evaluation (i.e., inference time).
+Mirrors decoders/evaluation/mmlu/evaluation_utils.py but adapts to the
+HAERAE-HUB/KMMLU dataset schema (columns: question, A, B, C, D, answer
+[1-indexed], Category, Human Accuracy) and uses the "dev" split for the
+5-shot demonstrations (KMMLU's analogue of MMLU's "validation" split).
 """
 
 import time
@@ -16,9 +15,26 @@ import random
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-from split_utils import process_prompts_with_split, minimal_split
 
 from zett.utils import get_surface_form_matrix
+
+
+# Subjects available as configs in HAERAE-HUB/KMMLU.
+KMMLU_SUBJECTS = [
+    "Accounting", "Agricultural-Sciences", "Aviation-Engineering-and-Maintenance",
+    "Biology", "Chemical-Engineering", "Chemistry", "Civil-Engineering",
+    "Computer-Science", "Construction", "Criminal-Law", "Ecology", "Economics",
+    "Education", "Electrical-Engineering", "Electronics-Engineering",
+    "Energy-Management", "Environmental-Science", "Fashion", "Food-Processing",
+    "Gas-Technology-and-Engineering", "Geomatics", "Health", "Industrial-Engineer",
+    "Information-Technology", "Interior-Architecture-and-Design", "Korean-History",
+    "Law", "Machine-Design-and-Manufacturing", "Management", "Maritime-Engineering",
+    "Marketing", "Materials-Engineering", "Math", "Mechanical-Engineering",
+    "Nondestructive-Testing", "Patent", "Political-Science-and-Sociology",
+    "Psychology", "Public-Safety", "Railway-and-Automotive-Engineering",
+    "Real-Estate", "Refrigerating-Machinery", "Social-Welfare", "Taxation",
+    "Telecommunications-and-Wireless-Technology",
+]
 
 
 class LatencyTracker:
@@ -56,7 +72,7 @@ class LatencyTracker:
             "n_batches": len(times),
         }
 
-    def report(self, args, total_examples: int, label: str = "mmlu"):
+    def report(self, args, total_examples: int, label: str = "kmmlu"):
         encode = self._summarize(self.encode_times)
         forward = self._summarize(self.forward_times)
         wall = self.total_wall_time
@@ -103,38 +119,15 @@ def get_hn_embeddings_for_tokens(
     base_input_embeddings: torch.Tensor,
     base_output_embeddings: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Generate hypernetwork embeddings for a list of tokens.
-    
-    This function takes a list of tokens and generates their corresponding
-    hypernetwork embeddings. Special tokens are handled by using the base
-    model's embeddings directly, while other tokens use the hypernetwork
-    predictions. The resulting embeddings are converted to bfloat16 for
-    memory efficiency.
-    
-    Args:
-        tokens: List of token strings to generate embeddings for
-        tokenizer: Hypernetwork tokenizer for surface form generation
-        lang_index: Language index tensor for the hypernetwork
-        hypernet: Hypernetwork model for embedding prediction
-        source_embeddings: Source embeddings for the hypernetwork
-        device: Target device for tensor operations
-        base_input_embeddings: Base model input embeddings for special tokens
-        base_output_embeddings: Base model output embeddings for special tokens
-        
-    Returns:
-        Tuple containing:
-        - predicted_input_embeddings: Generated input embeddings (bfloat16)
-        - predicted_output_embeddings: Generated output embeddings (bfloat16)
-    """
+    """Generate hypernetwork embeddings for a list of tokens (see mmlu/evaluation_utils.py)."""
     with torch.no_grad():
         target_surface_forms = get_surface_form_matrix(
-            tokens,  # byte representation of the tokens to predict
+            tokens,
             maxlen=hypernet.config.hn_surface_maxlen,
             tokenizer_to_use=tokenizer,
         )[0]
         target_surface_forms = torch.from_numpy(target_surface_forms).to(device)
-        
+
         special_tokens_mask = torch.isin(
             target_surface_forms[:, 0],
             torch.tensor(tokenizer.all_special_ids, device=device),
@@ -146,7 +139,6 @@ def get_hn_embeddings_for_tokens(
             source_embeddings=source_embeddings,
         )
 
-        # Replace special token embeddings with base model embeddings
         predicted_input_embeddings[special_tokens_mask] = base_input_embeddings[
             target_surface_forms[special_tokens_mask, 0]
         ]
@@ -159,7 +151,78 @@ def get_hn_embeddings_for_tokens(
             predicted_output_embeddings.to(torch.bfloat16)
         )
 
-class MMLUDataset(Dataset):
+
+def load_kmmlu_splits(ds_subject: str, max_retries: int = 5, base_backoff: float = 2.0):
+    """
+    Load test + per-subject dev datasets for KMMLU.
+
+    Returns (test_dataset, validation_dataset, per_subject_validation_datasets, subjects_used).
+    The returned datasets have a "subject" column added so downstream code can group accuracy
+    by subject the same way MMLUDataset does.
+
+    HF Hub occasionally returns 5xx; we retry each per-subject `load_dataset` call with
+    exponential backoff so a single transient failure doesn't kill the whole 45-subject job.
+    """
+    from datasets import load_dataset, concatenate_datasets
+
+    def _with_subject(ds, subject):
+        if "subject" in ds.column_names:
+            return ds
+        return ds.add_column("subject", [subject] * len(ds))
+
+    def _load_with_retry(subject):
+        last_err = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                return load_dataset("HAERAE-HUB/KMMLU", subject)
+            except Exception as e:
+                last_err = e
+                if attempt == max_retries:
+                    break
+                sleep_s = base_backoff ** attempt
+                print(
+                    f"  [retry] {subject}: attempt {attempt}/{max_retries} failed "
+                    f"({type(e).__name__}: {e}); sleeping {sleep_s:.1f}s",
+                    flush=True,
+                )
+                time.sleep(sleep_s)
+        raise RuntimeError(
+            f"Failed to load HAERAE-HUB/KMMLU config {subject!r} after {max_retries} attempts"
+        ) from last_err
+
+    if ds_subject == "all":
+        subjects = list(KMMLU_SUBJECTS)
+    else:
+        if ds_subject not in KMMLU_SUBJECTS:
+            raise ValueError(
+                f"Unknown KMMLU subject {ds_subject!r}. Use 'all' or one of: {KMMLU_SUBJECTS}"
+            )
+        subjects = [ds_subject]
+
+    test_parts = []
+    dev_parts = []
+    per_subject_dev = {}
+    for subj in subjects:
+        print(f"Downloading KMMLU subject {subj}", flush=True)
+        ds = _load_with_retry(subj)
+        test_parts.append(_with_subject(ds["test"], subj))
+        dev = _with_subject(ds["dev"], subj)
+        dev_parts.append(dev)
+        per_subject_dev[subj] = dev
+
+    test_dataset = concatenate_datasets(test_parts) if len(test_parts) > 1 else test_parts[0]
+    validation_dataset = concatenate_datasets(dev_parts) if len(dev_parts) > 1 else dev_parts[0]
+    return test_dataset, validation_dataset, per_subject_dev, subjects
+
+
+class KMMLUDataset(Dataset):
+    """
+    KMMLU equivalent of MMLUDataset. Reads HAERAE-HUB/KMMLU rows
+    (question, A, B, C, D, answer [1-indexed], Category) and produces the same
+    (prompt, choices, gold_index, context, init_prompt, subject) tuple shape
+    so the existing mmlu collate_fn / evaluator wiring works unchanged.
+    """
+
     def __init__(self, dataset, validation_dataset, validation_datasets, num_shots=5):
         self.dataset = dataset
         self.validation_dataset = validation_dataset
@@ -168,6 +231,14 @@ class MMLUDataset(Dataset):
 
     def __len__(self):
         return len(self.dataset)
+
+    @staticmethod
+    def _row_to_fields(row):
+        question = row["question"]
+        choices = [row["A"], row["B"], row["C"], row["D"]]
+        answer_idx = int(row["answer"]) - 1  # KMMLU answer is 1-indexed
+        subject = row.get("subject") or row.get("Category") or ""
+        return question, choices, answer_idx, subject
 
     def format_prompt(
         self,
@@ -179,14 +250,14 @@ class MMLUDataset(Dataset):
         answer: str = "",
         five_shot: bool = False,
     ):
-        subject = subject.replace("_", " ")
+        subject = subject.replace("_", " ").replace("-", " ")
         if is_context_question:
             assert answer != ""
             if same_domain_shot:
                 return f"This question refers to the following information.\n{question.strip()}\nA. {choices[0]}\nB. {choices[1]}\nC. {choices[2]}\nD. {choices[3]}\nAnswer: {answer}\n\n"
-            else:  # random domain shots
+            else:
                 return f"This question is about {subject} and refers to the following information.\n{question.strip()}\nA. {choices[0]}\nB. {choices[1]}\nC. {choices[2]}\nD. {choices[3]}\nAnswer: {answer}\n\n"
-        else:  # if main prompt question
+        else:
             if five_shot and same_domain_shot:
                 return f"This question refers to the following information.\n{question.strip()}\nA. {choices[0]}\nB. {choices[1]}\nC. {choices[2]}\nD. {choices[3]}\nAnswer:"
             elif five_shot and not same_domain_shot:
@@ -195,10 +266,7 @@ class MMLUDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.dataset[idx]
-        question = item["question"]
-        choices = item["choices"]
-        correct_answer_index = item["answer"]
-        subject = item["subject"]
+        question, choices, correct_answer_index, subject = self._row_to_fields(item)
         context = ""
         five_shot = getattr(self, 'five_shot', False)
         same_domain_shot = getattr(self, 'same_domain_shot', True)
@@ -208,34 +276,29 @@ class MMLUDataset(Dataset):
                     example = random.choice(self.validation_dataset)
                 else:
                     example = random.choice(self.validation_datasets[subject])
-                while example["question"] == question and set(
-                    example["choices"]
-                ) == set(choices):
+                ex_q, ex_choices, ex_idx, ex_subj = self._row_to_fields(example)
+                while ex_q == question and set(ex_choices) == set(choices):
                     if not same_domain_shot:
                         example = random.choice(self.validation_dataset)
                     else:
                         example = random.choice(self.validation_datasets[subject])
+                    ex_q, ex_choices, ex_idx, ex_subj = self._row_to_fields(example)
 
-                if example["question"] == question and set(example["choices"]) == set(
-                    choices
-                ):
+                if ex_q == question and set(ex_choices) == set(choices):
                     raise Exception(
                         "Context question should be different than prompt question. Please check!"
                     )
 
-                example_question = example["question"]
-                example_choices = example["choices"]
-                example_answer_index = example["answer"]
-                example_answer = chr(65 + example_answer_index)
+                example_answer = chr(65 + ex_idx)
                 if same_domain_shot:
-                    assert example["subject"] == subject
+                    assert ex_subj == subject
                 example_prompt = self.format_prompt(
-                    question=example_question,
-                    choices=example_choices,
+                    question=ex_q,
+                    choices=ex_choices,
                     is_context_question=True,
                     answer=example_answer,
                     same_domain_shot=same_domain_shot,
-                    subject=example["subject"],
+                    subject=ex_subj,
                 )
 
                 context += example_prompt
@@ -248,8 +311,8 @@ class MMLUDataset(Dataset):
             same_domain_shot=same_domain_shot,
         )
         if (five_shot and same_domain_shot) or (not five_shot):
-            subject = subject.replace("_", " ")
-            prompt = f"The following are multiple choice questions (with answers) about {subject}.\n\n{prompt}"
+            subject_pretty = subject.replace("_", " ").replace("-", " ")
+            prompt = f"The following are multiple choice questions (with answers) about {subject_pretty}.\n\n{prompt}"
         elif (five_shot and not same_domain_shot):
             prompt = f"The following are multiple choice questions (with answers).\n\n{prompt}"
         init_prompt = self.format_prompt(
@@ -261,6 +324,7 @@ class MMLUDataset(Dataset):
         )
         return prompt, choices, correct_answer_index, context, init_prompt, subject
 
+
 def collate_fn(batch):
     prompts = [item[0] for item in batch]
     choices = [item[1] for item in batch]
@@ -269,6 +333,7 @@ def collate_fn(batch):
     init_prompts = [item[4] for item in batch]
     subjects = [item[5] for item in batch]
     return prompts, choices, correct_answer_indices, contexts, init_prompts, subjects
+
 
 def setup_seed(seed):
     random.seed(0)
@@ -291,17 +356,8 @@ def evaluate_model(
     inout_1M_embeddings=None,
     subjects=None,
 ):
-    """
-    Score MMLU by picking the choice (A/B/C/D) with the highest score at the
-    last prompt token. Two paths:
-      - exp_type == "plain": tokenize with Mistral's tokenizer, take logits at
-        the last position, argmax over A/B/C/D token IDs.
-      - exp_type in {"original_tk_hypernet", "lp_tk_hypernet", "dynamic_bpe"}:
-        use the hypernet to produce input embeddings for prompt tokens (via
-        DatasetEncoder) and output embeddings for the four letter tokens. Take
-        the model's last hidden state, dot it against each letter's output
-        embedding, argmax.
-    """
+    """Same scoring strategy as MMLU: pick the choice (A/B/C/D) with the highest score
+    at the last prompt token, either via plain logits or via hypernet output embeddings."""
     eval_type = args.eval_type.lower()
     if eval_type not in ("original", "origianl"):
         raise NotImplementedError(
@@ -327,7 +383,6 @@ def evaluate_model(
 
 
 def _letter_token_id(tokenizer, letter: str) -> int:
-    """Single-token ID for ' <letter>' (preferred) or '<letter>'."""
     for cand in (f" {letter}", letter):
         ids = tokenizer.encode(cand, add_special_tokens=False)
         if len(ids) == 1:
@@ -341,7 +396,7 @@ def _print_and_log(args, total_correct, total_seen, correct_per_subject, total_p
     per_subject_acc = {
         s: correct_per_subject[s] / total_per_subject[s] for s in total_per_subject
     }
-    print(f"\nOverall MMLU accuracy: {overall_acc:.4f} ({total_correct}/{total_seen})")
+    print(f"\nOverall KMMLU accuracy: {overall_acc:.4f} ({total_correct}/{total_seen})")
     for s in sorted(per_subject_acc):
         print(
             f"  {s}: {per_subject_acc[s]:.4f} "
@@ -350,10 +405,10 @@ def _print_and_log(args, total_correct, total_seen, correct_per_subject, total_p
     if not args.no_wandb:
         wandb.log(
             {
-                "mmlu/overall_accuracy": overall_acc,
-                "mmlu/total_correct": total_correct,
-                "mmlu/total_seen": total_seen,
-                **{f"mmlu/per_subject/{s}": v for s, v in per_subject_acc.items()},
+                "kmmlu/overall_accuracy": overall_acc,
+                "kmmlu/total_correct": total_correct,
+                "kmmlu/total_seen": total_seen,
+                **{f"kmmlu/per_subject/{s}": v for s, v in per_subject_acc.items()},
             }
         )
     return overall_acc, per_subject_acc
@@ -386,28 +441,13 @@ def _evaluate_plain(dataloader, model, tokenizer, args):
                 prompts, _, gold_indices, _, _, subjects_in_batch = batch
 
                 t0 = time.perf_counter()
-                if (args.split):
-                    processed_input_ids_list = process_prompts_with_split(
-                        model=model,
-                        tokenizer=tokenizer,
-                        prompts=prompts,
-                        split_fn=minimal_split, # Or whichever split_fn you chose
-                        entropy_threshold=4.0,
-                        device=device
-                    )
-                    enc = tokenizer.pad(
-                        {"input_ids": [torch.tensor(ids) for ids in processed_input_ids_list]},
-                        padding=True,
-                        return_tensors="pt"
-                    ).to(device)
-                else:
-                    enc = tokenizer(
-                        prompts,
-                        return_tensors="pt",
-                        padding=True,
-                        truncation=True,
-                        max_length=args.max_len,
-                    ).to(device)
+                enc = tokenizer(
+                    prompts,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=args.max_len,
+                ).to(device)
                 _cuda_sync(device)
                 latency.encode_times.append(time.perf_counter() - t0)
 
@@ -438,7 +478,7 @@ def _evaluate_plain(dataloader, model, tokenizer, args):
         tokenizer.padding_side = prev_padding_side
         latency.stop()
 
-    latency.report(args, total_seen, label="mmlu")
+    latency.report(args, total_seen, label="kmmlu")
     return _print_and_log(args, total_correct, total_seen, correct_per_subject, total_per_subject)
 
 
@@ -452,35 +492,23 @@ def _evaluate_hypernet(
     source_embeddings,
     datasetEncoder,
 ):
-    """
-    Hypernet-aware MMLU eval. Works for original_tk_hypernet, lp_tk_hypernet,
-    and dynamic_bpe — they only differ in how DatasetEncoder tokenizes the
-    prompt. Output-side scoring is the same: dot the model's last hidden state
-    against hypernet-predicted output embeddings for ' A', ' B', ' C', ' D'.
-    """
+    """Hypernet-aware KMMLU eval. Uses task='mmlu' for the encoder since the
+    prompt structure (multiple-choice with last-token scoring) is identical to MMLU."""
     from collections import defaultdict
     from transformers import AutoTokenizer
 
     device = next(model.parameters()).device
     model.eval()
 
-    # source_embeddings is the fp32 (V, 2H) concat of base input + output embeddings on GPU.
-    # Slice it back into the two halves so we pass fp32 to the hypernet (which outputs fp32);
-    # using the live model's bf16 embeddings here triggers a dtype mismatch in the
-    # special-token assignment inside get_hn_embeddings_for_tokens.
     H = model.config.hidden_size
     base_input_emb = source_embeddings[:, :H]
     base_output_emb = source_embeddings[:, H:]
 
     if args.use_original_emb_for_choices:
-        # Mistral's native output embeddings for ' A', ' B', ' C', ' D'.
-        # Use a fresh original tokenizer in case `tokenizer` was swapped (lp_tk_hypernet).
         original_tok = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
         ids = [_letter_token_id(original_tok, L) for L in ("A", "B", "C", "D")]
         choice_output_emb = base_output_emb[torch.tensor(ids, device=device)]
     else:
-        # zett expects byte-level (BBPE) surface forms — space encodes to 'Ġ'.
-        # Convert " A"/" B"/" C"/" D" into BBPE form before handing to the hypernet.
         from zett.utils import CHARS_TO_BYTES
         bytes_to_chars = {v: k for k, v in CHARS_TO_BYTES.items()}
         def _to_bbpe(s: str) -> str:
@@ -552,5 +580,5 @@ def _evaluate_hypernet(
                 )
 
     latency.stop()
-    latency.report(args, total_seen, label="mmlu")
+    latency.report(args, total_seen, label="kmmlu")
     return _print_and_log(args, total_correct, total_seen, correct_per_subject, total_per_subject)

@@ -55,6 +55,7 @@ def main():
         help="SuperBPE two-stage schedule: first N merges use strict 'pretokens' boundary, "
              "remainder use --bpe_tokenizer_boundary. 0 disables the warm-up phase.",
     )
+    parser.add_argument("--split", type=bool, default=False, help="Enable entropy-based prompt re-tokenizing")
 
     args = parser.parse_args()
     setup_seed(1234)
