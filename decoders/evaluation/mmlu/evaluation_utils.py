@@ -14,7 +14,9 @@ import random
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-from split_utils import process_prompts_with_split, minimal_split
+from split_utils import process_prompts_with_split, process_prompts_with_random_split, minimal_split
+from collections import defaultdict
+import time
 
 from zett.utils import get_surface_form_matrix
 
@@ -233,7 +235,7 @@ def evaluate_model(
         raise NotImplementedError(
             f"evaluate_model only supports eval_type='original'; got {args.eval_type!r}."
         )
-
+    
     if args.exp_type == "plain":
         return _evaluate_plain(dataloader, model, tokenizer, args)
     if args.exp_type in ("original_tk_hypernet", "lp_tk_hypernet", "dynamic_bpe"):
@@ -298,6 +300,11 @@ def _evaluate_plain(dataloader, model, tokenizer, args):
         [_letter_token_id(tokenizer, L) for L in ("A", "B", "C", "D")], device=device
     )
 
+    # Timing accumulators (in seconds)
+    total_processing_time = 0.0
+    total_inference_time = 0.0
+    start_total = time.time()
+
     correct_per_subject = defaultdict(int)
     total_per_subject = defaultdict(int)
     total_correct = 0
@@ -308,14 +315,27 @@ def _evaluate_plain(dataloader, model, tokenizer, args):
             for batch_idx, batch in enumerate(dataloader):
                 prompts, _, gold_indices, _, _, subjects_in_batch = batch
                 
+                # --- Time the Input Processing Stage ---
+                t0 = time.time()
                 if (args.split):
                     processed_input_ids_list = process_prompts_with_split(
                         model=model,
                         tokenizer=tokenizer,
                         prompts=prompts,
-                        split_fn=minimal_split, # Or whichever split_fn you chose
+                        split_fn=minimal_split,
                         entropy_threshold=4.0,
                         device=device
+                    )
+                    enc = tokenizer.pad(
+                        {"input_ids": [torch.tensor(ids) for ids in processed_input_ids_list]},
+                        padding=True,
+                        return_tensors="pt"
+                    ).to(device)
+                elif(args.random_split):
+                    processed_input_ids_list = process_prompts_with_random_split(
+                        tokenizer=tokenizer,
+                        prompts=prompts,
+                        split_fn=minimal_split, 
                     )
                     enc = tokenizer.pad(
                         {"input_ids": [torch.tensor(ids) for ids in processed_input_ids_list]},
@@ -331,10 +351,18 @@ def _evaluate_plain(dataloader, model, tokenizer, args):
                         max_length=args.max_len,
                     ).to(device)
 
+                torch.cuda.synchronize() # Ensure processing/padding is done
+                total_processing_time += (time.time() - t0)
+
+                # --- Time the Model Inference Stage ---
+                t1 = time.time()
                 logits = model(**enc).logits
                 last_logits = logits[:, -1, :]
                 choice_logits = last_logits[:, choice_token_ids]
                 preds = choice_logits.argmax(dim=-1).tolist()
+
+                torch.cuda.synchronize() # Ensure GPU kernels finished
+                total_inference_time += (time.time() - t1)
 
                 for pred, gold, subj in zip(preds, gold_indices, subjects_in_batch):
                     correct = int(pred == gold)
@@ -353,6 +381,19 @@ def _evaluate_plain(dataloader, model, tokenizer, args):
     finally:
         tokenizer.padding_side = prev_padding_side
 
+    # --- Generate Report ---
+    end_total = time.time()
+    total_duration = end_total - start_total
+    print("\n" + "="*40)
+    print("MMLU PLAIN EVALUATION TIME REPORT")
+    print("-" * 40)
+    print(f"Total Wall Time:          {total_duration:8.2f} s")
+    print(f"Avg Processing/Split:     {(total_processing_time/max(batch_idx+1, 1))*1000:8.2f} ms/batch")
+    print(f"Avg Model Forward:        {(total_inference_time/max(batch_idx+1, 1))*1000:8.2f} ms/batch")
+    print(f"Total Processing Share:   {(total_processing_time/total_duration)*100:8.1f}%")
+    print(f"Total Inference Share:    {(total_inference_time/total_duration)*100:8.1f}%")
+    print("=" * 40 + "\n")
+    
     return _print_and_log(args, total_correct, total_seen, correct_per_subject, total_per_subject)
 
 

@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+import random
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 @torch.no_grad()
@@ -44,6 +45,27 @@ def process_prompts_with_split(model, tokenizer, prompts, split_fn, entropy_thre
         processed_prompts.append(new_prompt)
         
     return processed_prompts
+
+def process_prompts_with_random_split(tokenizer, prompts, split_fn, split_prob=0.2):
+    encoded_prompts = [tokenizer.encode(p, add_special_tokens=True) for p in prompts]
+    processed_prompts = []
+    
+    for i, original_ids in enumerate(encoded_prompts):
+        # Initialize with the first token (usually BOS)
+        new_prompt = [original_ids[0]]
+        for j in range(1, len(original_ids)):
+            next_token_id = original_ids[j]
+            if (random.random() < split_prob):
+                # Apply your modular splitting strategy
+                fragments = split_fn(tokenizer, next_token_id)
+                new_prompt.extend(fragments)
+            else:
+                new_prompt.append(next_token_id)
+
+        processed_prompts.append(new_prompt)
+
+    return processed_prompts
+        
 
 def mask_last_char_split(tokenizer, token_id):
     # 1. Get the string (e.g., "Paris")
