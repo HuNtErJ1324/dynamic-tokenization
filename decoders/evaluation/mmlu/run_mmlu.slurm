@@ -4,14 +4,18 @@
 #SBATCH --error=logs/mmlu-%x-%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
+#SBATCH --gpus=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:a100:1
-#SBATCH --mem=64G
+#SBATCH --mem=200G
 #SBATCH --time=12:00:00
-#SBATCH --partition=ckpt-all
-#SBATCH --account=stf
-#SBATCH --requeue
-#SBATCH --signal=B:SIGTERM@60
+#SBATCH --qos=normal
+# #SBATCH --account=<allocation>   # uncomment if your Tillicum project requires one
+#
+# Tillicum (Hyak) scheduling model — see https://hyak.uw.edu/docs/tillicum/scheduling-jobs
+#   - QoS-based, no partitions. Default --qos=normal: 24h max walltime, up to 16 GPUs/job.
+#   - A GPU request is mandatory (jobs without GPUs are rejected). Nodes have 8x H200.
+#   - Each GPU grants 8 CPUs + ~200G system RAM; to get more CPU/RAM, request more GPUs.
+#   - No preemptible checkpoint partition, so --requeue / --signal handling is not needed.
 
 set -euo pipefail
 
@@ -23,7 +27,7 @@ cd "$PROJECT_ROOT"
 mkdir -p "$PROJECT_ROOT/logs"
 
 # --- env ---------------------------------------------------------------------
-# Conda is already in the inherited login env on Hyak; just enable `conda activate`
+# Conda is already in the inherited login env on Tillicum; just enable `conda activate`
 # in this non-interactive shell and switch to the project env.
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate dyntok
