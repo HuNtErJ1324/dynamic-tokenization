@@ -92,6 +92,8 @@ def run_eval(
     min_p,
     eos_bias,
     dynamic_bpe_merges,
+    bpe_tokenizer_boundary="pretokens",
+    transition_point=0,
 ):
     setup_seed(1234)
     questions = load_questions(question_file, question_begin, question_end)
@@ -137,6 +139,8 @@ def run_eval(
                 min_p=min_p,
                 eos_bias=eos_bias,
                 dynamic_bpe_merges=dynamic_bpe_merges,
+                bpe_tokenizer_boundary=bpe_tokenizer_boundary,
+                transition_point=transition_point,
             )
         )
 
@@ -444,6 +448,8 @@ def get_model_answers(
     min_p,
     eos_bias,
     dynamic_bpe_merges,
+    bpe_tokenizer_boundary="pretokens",
+    transition_point=0,
 ):
     global total_old_tokens_used
     global total_new_tokens_used
@@ -583,7 +589,8 @@ def get_model_answers(
             embeddings_cache=embeddings_cache,
             exp_type="dynamic_bpe",
             collect_extra_data=True,
-            bpe_tokenizer_boundary="pretokens",
+            bpe_tokenizer_boundary=bpe_tokenizer_boundary,
+            transition_point=transition_point,
         )
 
     seq_lens = []
@@ -858,6 +865,19 @@ if __name__ == "__main__":
         default=None,
         help="Use dynamic tokenization with HN embeddings. Check results with different % seq. reduction",
     )
+    parser.add_argument(
+        "--bpe_tokenizer_boundary",
+        type=str,
+        default="pretokens",
+        help="Merge boundary for dynamic_bpe: pretokens, word, word_hyphen, sentence, superbpe.",
+    )
+    parser.add_argument(
+        "--transition_point",
+        type=int,
+        default=0,
+        help="SuperBPE two-stage schedule: first N merges use strict 'pretokens' boundary, "
+             "remainder use --bpe_tokenizer_boundary. 0 disables the warm-up phase.",
+    )
 
     args = parser.parse_args()
 
@@ -903,6 +923,8 @@ if __name__ == "__main__":
         min_p=args.min_p,
         eos_bias=args.eos_bias,
         dynamic_bpe_merges=args.dynamic_bpe_merges,
+        bpe_tokenizer_boundary=args.bpe_tokenizer_boundary,
+        transition_point=args.transition_point,
     )
 
     reorg_answer_file(answer_file)
