@@ -21,7 +21,7 @@ set -euo pipefail
 
 # --- paths -------------------------------------------------------------------
 # Root of the repo on the HPC (the directory containing tokenizations/, encoders/, decoders/).
-PROJECT_ROOT="${PROJECT_ROOT:-$SCRATCH/dynamic-tokenization}"
+PROJECT_ROOT="${PROJECT_ROOT:-/gpfs/projects/stf/dyntok/dynamic-tokenization}"
 
 cd "$PROJECT_ROOT"
 mkdir -p "$PROJECT_ROOT/logs"
@@ -29,7 +29,7 @@ mkdir -p "$PROJECT_ROOT/logs"
 # --- env ---------------------------------------------------------------------
 # Conda is already in the inherited login env on Tillicum; just enable `conda activate`
 # in this non-interactive shell and switch to the project env.
-source "$(conda info --base)/etc/profile.d/conda.sh"
+module load dyntok
 conda activate dyntok
 
 # Avoid HF tokenizers parallelism warning under DataLoader
