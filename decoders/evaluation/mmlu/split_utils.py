@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+import random
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 @torch.no_grad()
@@ -45,6 +46,27 @@ def process_prompts_with_split(model, tokenizer, prompts, split_fn, entropy_thre
         
     return processed_prompts
 
+def process_prompts_with_random_split(tokenizer, prompts, split_fn, split_prob=0.2):
+    encoded_prompts = [tokenizer.encode(p, add_special_tokens=True) for p in prompts]
+    processed_prompts = []
+    
+    for i, original_ids in enumerate(encoded_prompts):
+        # Initialize with the first token (usually BOS)
+        new_prompt = [original_ids[0]]
+        for j in range(1, len(original_ids)):
+            next_token_id = original_ids[j]
+            if (random.random() < split_prob):
+                # Apply your modular splitting strategy
+                fragments = split_fn(tokenizer, next_token_id)
+                new_prompt.extend(fragments)
+            else:
+                new_prompt.append(next_token_id)
+
+        processed_prompts.append(new_prompt)
+
+    return processed_prompts
+        
+
 def mask_last_char_split(tokenizer, token_id):
     # 1. Get the string (e.g., "Paris")
     text = tokenizer.decode([token_id], clean_up_tokenization_spaces=False)
@@ -76,17 +98,95 @@ def middle_split(tokenizer, token_id):
     
     return prefix_ids + suffix_ids
 
-def minimal_split(tokenizer, token_id):
+def is_korean(char):
+    # Hangul syllables range
+    return '\uac00' <= char <= '\ud7a3'
+
+def decompose_hangul(char):
+    """
+    Decompose a single Hangul syllable into jamo (초성, 중성, 종성).
+    
+    Returns:
+        list of jamo characters (e.g., ['ㅎ','ㅏ','ㄴ'])
+        or [char] if not a Hangul syllable
+    """
+    code = ord(char)
+
+    # Hangul syllable range
+    if not (0xAC00 <= code <= 0xD7A3):
+        return [char]
+
+    base = code - 0xAC00
+
+    choseong_idx = base // 588
+    jungseong_idx = (base % 588) // 28
+    jongseong_idx = base % 28
+
+    CHOSEONG = [
+        "ㄱ","ㄲ","ㄴ","ㄷ","ㄸ","ㄹ","ㅁ","ㅂ","ㅃ","ㅅ",
+        "ㅆ","ㅇ","ㅈ","ㅉ","ㅊ","ㅋ","ㅌ","ㅍ","ㅎ"
+    ]
+
+    JUNGSEONG = [
+        "ㅏ","ㅐ","ㅑ","ㅒ","ㅓ","ㅔ","ㅕ","ㅖ","ㅗ","ㅘ",
+        "ㅙ","ㅚ","ㅛ","ㅜ","ㅝ","ㅞ","ㅟ","ㅠ","ㅡ","ㅢ","ㅣ"
+    ]
+
+    JONGSEONG = [
+        "", "ㄱ","ㄲ","ㄳ","ㄴ","ㄵ","ㄶ","ㄷ","ㄹ","ㄺ",
+        "ㄻ","ㄼ","ㄽ","ㄾ","ㄿ","ㅀ","ㅁ","ㅂ","ㅄ","ㅅ",
+        "ㅆ","ㅇ","ㅈ","ㅊ","ㅋ","ㅌ","ㅍ","ㅎ"
+    ]
+
+    result = [
+        CHOSEONG[choseong_idx],
+        JUNGSEONG[jungseong_idx]
+    ]
+
+    if JONGSEONG[jongseong_idx]:
+        result.append(JONGSEONG[jongseong_idx])
+
+    return result
+
+def minimal_split(tokenizer, token_id, jamo=True):
     # 1. Decode to string
     text = tokenizer.decode([token_id], clean_up_tokenization_spaces=False)
     
+    stripped = text.strip()
+
+    # Handle single Korean unicode character → split into UTF-8 bytes
+    if len(stripped) == 1 and is_korean(stripped):
+        if (jamo):
+            # print(f"jamo detected {stripped}")
+            jamos = decompose_hangul(stripped)
+            # print(f"{stripped} -> {jamos}")
+
+            jamo_ids = []
+            for j in jamos:
+                ids = tokenizer.encode(j, add_special_tokens=False)
+                jamo_ids.extend(ids)
+                # print(jamo_ids)
+            
+            if len(jamo_ids) > 1:
+                return jamo_ids
+        else:
+            byte_values = stripped.encode("utf-8")
+            
+            byte_ids = []
+            for b in byte_values:
+                byte_token = bytes([b]).decode("latin-1")
+                ids = tokenizer.encode(byte_token, add_special_tokens=False)
+                byte_ids.extend(ids)
+            
+            if len(byte_ids) > 1:
+                return byte_ids
+
     # 2. Length Constraint: Skip words shorter than 3 characters
-    if len(text.strip()) <= 3:
+    if len(stripped) <= 3:
         return [token_id]
 
     best_ids = [token_id]
     min_token_count = float('inf')
-    found_split = False
 
     # 3. Exhaustive search for the most efficient split point
     # We try every possible split point from n=1 to len-1
@@ -107,7 +207,6 @@ def minimal_split(tokenizer, token_id):
             if total_tokens < min_token_count:
                 min_token_count = total_tokens
                 best_ids = combined
-                found_split = True
             
             # Optimization: If we find a 2-token split, that's the absolute minimum 
             # for a split, so we can return immediately.
