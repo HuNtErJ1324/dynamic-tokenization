@@ -310,6 +310,9 @@ def _evaluate_plain(dataloader, model, tokenizer, args):
     total_correct = 0
     total_seen = 0
 
+    if args.split_threshold:
+        print(f'running with threshold={args.split_threshold}')
+
     try:
         with torch.no_grad():
             for batch_idx, batch in enumerate(dataloader):
@@ -323,7 +326,7 @@ def _evaluate_plain(dataloader, model, tokenizer, args):
                         tokenizer=tokenizer,
                         prompts=prompts,
                         split_fn=minimal_split,
-                        entropy_threshold=4.0,
+                        entropy_threshold=args.split_threshold,
                         device=device
                     )
                     enc = tokenizer.pad(

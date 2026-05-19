@@ -44,6 +44,7 @@ def main():
     parser.add_argument("--merges", type=int, default=1000, help="Number of BPE merges for dynamic_bpe (ignored for other exp_types)")
     parser.add_argument("--split", action="store_true", help="Enable entropy-based prompt re-tokenizing")
     parser.add_argument("--random_split", action="store_true", help="Enable entropy-based prompt re-tokenizing")
+    parser.add_argument("--split_threshold", type=float, default=4.0, help="Entropy threshold that triggers a token split")
 
     args = parser.parse_args()
     setup_seed(1234)
@@ -112,6 +113,8 @@ def main():
     subjects = [
         "abstract_algebra", "high_school_government_and_politics", "anatomy", "astronomy", "business_ethics", "clinical_knowledge", "college_biology", "college_chemistry", "college_computer_science", "college_mathematics", "college_medicine", "college_physics", "computer_security", "conceptual_physics", "econometrics", "electrical_engineering", "elementary_mathematics", "formal_logic", "global_facts", "high_school_biology", "high_school_chemistry", "high_school_computer_science", "high_school_european_history", "high_school_geography", "high_school_macroeconomics", "high_school_mathematics", "high_school_microeconomics", "high_school_physics", "high_school_psychology", "high_school_statistics", "high_school_us_history", "high_school_world_history", "human_aging", "human_sexuality", "international_law", "jurisprudence", "logical_fallacies", "machine_learning", "management", "marketing", "medical_genetics", "miscellaneous", "moral_disputes", "moral_scenarios", "nutrition", "philosophy", "prehistory", "professional_accounting", "professional_law", "professional_medicine", "professional_psychology", "public_relations", "security_studies", "sociology", "us_foreign_policy", "virology", "world_religions",
     ]
+
+    subjects = ["college_biology", "elementary biology"]
 
     dataset = load_dataset("cais/mmlu", args.ds_subject)["test"]
     validation_dataset = load_dataset("cais/mmlu", args.ds_subject)["validation"]
