@@ -5,6 +5,7 @@ from tokenizations.dynamic_bpe import Dynamic_BPE
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from decoders.evaluation.mmlu.split_utils import process_prompts_with_split, minimal_split
 
+# Run the script from root directory with the command python -m decoders.evaluation.mmlu.split_demo
 if __name__ == "__main__":
     model_id = "mistralai/Mistral-7B-v0.1"
     hypernet_id = "benjamin/zett-hypernetwork-Mistral-7B-v0.1"
@@ -38,12 +39,10 @@ if __name__ == "__main__":
 
     encoded_prompts = [tokenizer.encode(p, add_special_tokens=True) for p in test_prompts]
     for p in encoded_prompts:
-        print(p)
         # This decodes each ID separately so you can see the 'cuts'
         token_list = [tokenizer.decode([token_id]) for token_id in p]
         print(token_list)
-
-    print("Starting entropy-split prefill...")
+        
     final_input_ids = process_prompts_with_split(
         model, 
         tokenizer, 
@@ -52,8 +51,6 @@ if __name__ == "__main__":
         entropy_threshold=3.0,
         device=device
     )
-
-    print("\nPrefill Complete.")
     
     # Decode one to see the result
     for i, output in enumerate(final_input_ids):

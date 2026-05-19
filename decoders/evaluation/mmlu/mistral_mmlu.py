@@ -16,12 +16,13 @@ import argparse
 import sys
 from torch.utils.data import DataLoader
 import wandb
-from evaluation_utils import MMLUDataset, collate_fn, setup_seed, evaluate_model
+from evaluation_utils import MMLUDataset, collate_fn, setup_seed, evaluate_model, evaluate_plain_split_divergence
 from tokenizers.models import BPE, WordPiece
 
 from pathlib import Path
 HOME_PATH = str(Path(__file__).resolve().parents[3])
 sys.path.insert(0, HOME_PATH)
+sys.stdout.reconfigure(encoding='utf-8')
 from tokenizations.tokenization_utils import DatasetEncoder
 from tokenizations.hypernet_cache import LRU_Cache
 
@@ -45,6 +46,8 @@ def main():
     parser.add_argument("--split", action="store_true", help="Enable entropy-based prompt re-tokenizing")
     parser.add_argument("--random_split", action="store_true", help="Enable entropy-based prompt re-tokenizing")
     parser.add_argument("--split_threshold", type=float, default=4.0, help="Entropy threshold that triggers a token split")
+    parser.add_argument("--split_divergence_analysis", action="store_true", help="Run split divergence analysis across thresholds")
+    parser.add_argument("--divergence_subject", type=str, default=None, help="Subject to analyze for divergence (if None, analyze all)")
 
     args = parser.parse_args()
     setup_seed(1234)
@@ -139,19 +142,29 @@ def main():
     mmlu_dataset.same_domain_shot = args.same_domain_shot
     dataloader = DataLoader(mmlu_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collate_fn)
 
-    evaluate_model(
-        dataloader=dataloader,
-        model=model,
-        tokenizer=tokenizer,
-        args=args,
-        base_model=base_model,
-        hypernet=hypernet,
-        lang_index=lang_index,
-        source_embeddings=source_embeddings,
-        datasetEncoder=datasetEncoder,
-        inout_1M_embeddings=inout_1M_embeddings,
-        subjects=subjects,
-    )
+    if args.split_divergence_analysis:
+        # Run divergence analysis
+        evaluate_plain_split_divergence(
+            dataloader=dataloader,
+            model=model,
+            tokenizer=tokenizer,
+            args=args,
+            subject=args.divergence_subject
+        )
+    else:
+        evaluate_model(
+            dataloader=dataloader,
+            model=model,
+            tokenizer=tokenizer,
+            args=args,
+            base_model=base_model,
+            hypernet=hypernet,
+            lang_index=lang_index,
+            source_embeddings=source_embeddings,
+            datasetEncoder=datasetEncoder,
+            inout_1M_embeddings=inout_1M_embeddings,
+            subjects=subjects,
+        )
 
 if __name__ == "__main__":
     main()
