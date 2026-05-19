@@ -8,6 +8,8 @@ Includes:
 - Generate token embeddings on-the-fly. This is used to embed tokens during evaluation (i.e., inference time).
 """
 
+import time
+import statistics
 import torch
 from typing import List, Tuple
 import random
@@ -16,9 +18,80 @@ import torch
 from torch.utils.data import Dataset
 from split_utils import process_prompts_with_split, process_prompts_with_random_split, minimal_split
 from collections import defaultdict
-import time
 
 from zett.utils import get_surface_form_matrix
+
+
+class LatencyTracker:
+    """Collects per-batch timings so different exp_types can be compared apples-to-apples."""
+
+    def __init__(self):
+        self.encode_times: List[float] = []
+        self.forward_times: List[float] = []
+        self._wall_start = None
+        self._wall_end = None
+
+    def start(self):
+        self._wall_start = time.perf_counter()
+
+    def stop(self):
+        self._wall_end = time.perf_counter()
+
+    @property
+    def total_wall_time(self) -> float:
+        if self._wall_start is None or self._wall_end is None:
+            return 0.0
+        return self._wall_end - self._wall_start
+
+    @staticmethod
+    def _summarize(times: List[float]) -> dict:
+        if not times:
+            return {}
+        srt = sorted(times)
+        p95_idx = max(0, int(round(0.95 * len(srt))) - 1)
+        return {
+            "total_s": sum(times),
+            "mean_ms": statistics.mean(times) * 1000.0,
+            "median_ms": statistics.median(times) * 1000.0,
+            "p95_ms": srt[p95_idx] * 1000.0,
+            "n_batches": len(times),
+        }
+
+    def report(self, args, total_examples: int, label: str = "mmlu"):
+        encode = self._summarize(self.encode_times)
+        forward = self._summarize(self.forward_times)
+        wall = self.total_wall_time
+        thru = total_examples / wall if wall > 0 else 0.0
+        ms_per_ex = (wall / total_examples * 1000.0) if total_examples > 0 else 0.0
+
+        print(f"\n--- {label.upper()} latency ({args.exp_type}, batch_size={args.batch_size}) ---", flush=True)
+        print(f"[latency] total_wall_time={wall:.2f}s   examples={total_examples}   "
+              f"throughput={thru:.2f} ex/s   per_example={ms_per_ex:.2f} ms", flush=True)
+        if encode:
+            print(f"[latency] encode  total={encode['total_s']:.2f}s   mean={encode['mean_ms']:.2f}ms   "
+                  f"median={encode['median_ms']:.2f}ms   p95={encode['p95_ms']:.2f}ms   "
+                  f"n_batches={encode['n_batches']}", flush=True)
+        if forward:
+            print(f"[latency] forward total={forward['total_s']:.2f}s   mean={forward['mean_ms']:.2f}ms   "
+                  f"median={forward['median_ms']:.2f}ms   p95={forward['p95_ms']:.2f}ms   "
+                  f"n_batches={forward['n_batches']}", flush=True)
+
+        if not args.no_wandb:
+            import wandb
+            log_dict = {
+                f"latency/{label}/total_wall_time_s": wall,
+                f"latency/{label}/throughput_ex_per_s": thru,
+                f"latency/{label}/per_example_ms": ms_per_ex,
+            }
+            for stage, stats in (("encode", encode), ("forward", forward)):
+                for k, v in stats.items():
+                    log_dict[f"latency/{label}/{stage}_{k}"] = v
+            wandb.log(log_dict)
+
+
+def _cuda_sync(device: torch.device):
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
 
 
 def get_hn_embeddings_for_tokens(
@@ -300,11 +373,6 @@ def _evaluate_plain(dataloader, model, tokenizer, args):
         [_letter_token_id(tokenizer, L) for L in ("A", "B", "C", "D")], device=device
     )
 
-    # Timing accumulators (in seconds)
-    total_processing_time = 0.0
-    total_inference_time = 0.0
-    start_total = time.time()
-
     correct_per_subject = defaultdict(int)
     total_per_subject = defaultdict(int)
     total_correct = 0
@@ -312,14 +380,16 @@ def _evaluate_plain(dataloader, model, tokenizer, args):
 
     if args.split_threshold:
         print(f'running with threshold={args.split_threshold}')
+        
+    latency = LatencyTracker()
+    latency.start()
 
     try:
         with torch.no_grad():
             for batch_idx, batch in enumerate(dataloader):
                 prompts, _, gold_indices, _, _, subjects_in_batch = batch
-                
-                # --- Time the Input Processing Stage ---
-                t0 = time.time()
+
+                t0 = time.perf_counter()
                 if (args.split):
                     processed_input_ids_list = process_prompts_with_split(
                         model=model,
@@ -353,13 +423,14 @@ def _evaluate_plain(dataloader, model, tokenizer, args):
                         truncation=True,
                         max_length=args.max_len,
                     ).to(device)
+                _cuda_sync(device)
+                latency.encode_times.append(time.perf_counter() - t0)
 
-                torch.cuda.synchronize() # Ensure processing/padding is done
-                total_processing_time += (time.time() - t0)
-
-                # --- Time the Model Inference Stage ---
-                t1 = time.time()
+                t1 = time.perf_counter()
                 logits = model(**enc).logits
+                _cuda_sync(device)
+                latency.forward_times.append(time.perf_counter() - t1)
+
                 last_logits = logits[:, -1, :]
                 choice_logits = last_logits[:, choice_token_ids]
                 preds = choice_logits.argmax(dim=-1).tolist()
@@ -383,20 +454,9 @@ def _evaluate_plain(dataloader, model, tokenizer, args):
                     )
     finally:
         tokenizer.padding_side = prev_padding_side
+        latency.stop()
 
-    # --- Generate Report ---
-    end_total = time.time()
-    total_duration = end_total - start_total
-    print("\n" + "="*40)
-    print("MMLU PLAIN EVALUATION TIME REPORT")
-    print("-" * 40)
-    print(f"Total Wall Time:          {total_duration:8.2f} s")
-    print(f"Avg Processing/Split:     {(total_processing_time/max(batch_idx+1, 1))*1000:8.2f} ms/batch")
-    print(f"Avg Model Forward:        {(total_inference_time/max(batch_idx+1, 1))*1000:8.2f} ms/batch")
-    print(f"Total Processing Share:   {(total_processing_time/total_duration)*100:8.1f}%")
-    print(f"Total Inference Share:    {(total_inference_time/total_duration)*100:8.1f}%")
-    print("=" * 40 + "\n")
-    
+    latency.report(args, total_seen, label="mmlu")
     return _print_and_log(args, total_correct, total_seen, correct_per_subject, total_per_subject)
 
 
@@ -463,10 +523,14 @@ def _evaluate_hypernet(
     total_correct = 0
     total_seen = 0
 
+    latency = LatencyTracker()
+    latency.start()
+
     with torch.no_grad():
         for batch_idx, batch in enumerate(dataloader):
             prompts, _, gold_indices, _, _, subjects_in_batch = batch
 
+            t0 = time.perf_counter()
             encoded = datasetEncoder.encode_examples_unique_tokens_lru(
                 examples=list(prompts),
                 max_length=args.max_len,
@@ -475,13 +539,19 @@ def _evaluate_hypernet(
             )
             inputs_embeds = encoded["inputs_embeds"].to(torch.bfloat16)
             attention_mask = encoded["attention_mask"]
+            _cuda_sync(device)
+            latency.encode_times.append(time.perf_counter() - t0)
 
+            t1 = time.perf_counter()
             outputs = model.model(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
             )
             last_hidden = outputs.last_hidden_state[:, -1, :]
             scores = last_hidden.float() @ choice_output_emb.float().T
+            _cuda_sync(device)
+            latency.forward_times.append(time.perf_counter() - t1)
+
             preds = scores.argmax(dim=-1).tolist()
 
             for pred, gold, subj in zip(preds, gold_indices, subjects_in_batch):
@@ -499,6 +569,8 @@ def _evaluate_hypernet(
                     flush=True,
                 )
 
+    latency.stop()
+    latency.report(args, total_seen, label="mmlu")
     return _print_and_log(args, total_correct, total_seen, correct_per_subject, total_per_subject)
 
 def evaluate_plain_split_divergence(dataloader, model, tokenizer, args, subject=None):

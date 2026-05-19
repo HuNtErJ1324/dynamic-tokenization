@@ -40,6 +40,7 @@ class DatasetEncoder:
         bpe_tokenizer_boundary: str = "pretokens",
         merges: int = None,
         collect_extra_data: bool = False,
+        transition_point: int = 0,
     ) -> None:
         self.tokens_processed_per_batch = []
         self.unique_tokens_per_batch = []
@@ -55,6 +56,7 @@ class DatasetEncoder:
         self.bpe_tokenizer_boundary = bpe_tokenizer_boundary
         self.collect_extra_data = collect_extra_data
         self.merges = merges
+        self.transition_point = transition_point
         self.dynamic_bpe = Dynamic_BPE(
             tokenizer=self.tokenizer, tokenizer_boundary=self.bpe_tokenizer_boundary
         )
@@ -152,6 +154,7 @@ class DatasetEncoder:
                         nli=nli,
                         mmlu=mmlu,
                         max_length=max_length,
+                        transition_point=self.transition_point,
                     )
                 )
                 if self.collect_extra_data:
