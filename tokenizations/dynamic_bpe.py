@@ -16,7 +16,18 @@ from typing import Dict, Tuple, List, Set, Any
 from datasets.formatting.formatting import LazyBatch
 from tokenizations.tokenizers_utils import pretokenize, tokenize
 from tokenizers import pre_tokenizers
-from zett.utils import CHARS_TO_BYTES
+def _build_chars_to_bytes():
+    bs = list(range(ord("!"), ord("~")+1)) + list(range(ord("¡"), ord("¬")+1)) + list(range(ord("®"), ord("ÿ")+1))
+    cs = bs[:]
+    n = 0
+    for b in range(2**8):
+        if b not in bs:
+            bs.append(b)
+            cs.append(2**8+n)
+            n += 1
+    return {chr(c): b for b, c in zip(bs, cs)}
+
+CHARS_TO_BYTES = _build_chars_to_bytes()
 
 class Dynamic_BPE:
     """

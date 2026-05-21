@@ -20,7 +20,32 @@ from datasets.formatting.formatting import LazyBatch
 from tokenizations.hypernet_cache import LRU_Cache
 from tokenizations.dynamic_bpe import Dynamic_BPE
 from tokenizations.tokenizers_utils import tokenize, pretokenize
-from zett.utils import get_surface_form_matrix
+from tokenizations.dynamic_bpe import CHARS_TO_BYTES
+
+def get_surface_form_matrix(tokenizer_or_tokens, maxlen, tokenizer_to_use=None, padding=0, verbose=False):
+    if isinstance(tokenizer_or_tokens, list):
+        tokens = tokenizer_or_tokens
+    else:
+        tokenizer = tokenizer_or_tokens
+        tokens = tokenizer.convert_ids_to_tokens(range(len(tokenizer)))
+    vocab_size = len(tokens)
+    surface_form_matrix = np.full(
+        (vocab_size + padding, maxlen),
+        tokenizer_to_use.pad_token_id if tokenizer_to_use is not None else 0,
+        dtype=np.int32,
+    )
+    n_truncated = 0
+    for i, token in enumerate(tqdm(tokens, total=vocab_size, disable=not verbose)):
+        if token in tokenizer_to_use.all_special_tokens:
+            surface_form_matrix[i, 0] = tokenizer_to_use.convert_tokens_to_ids(token)
+            continue
+        token_bytes = bytes([CHARS_TO_BYTES[c] for c in token])
+        ids = [x.id for x in tokenizer_to_use._tokenizer.model.tokenize(token)]
+        if len(ids) > maxlen:
+            ids = ids[:maxlen]
+            n_truncated += 1
+        surface_form_matrix[i, : len(ids)] = ids
+    return surface_form_matrix, n_truncated
 
 
 class DatasetEncoder:
@@ -262,6 +287,7 @@ class DatasetEncoder:
                                 self.exp_type == "word_tk_hypernet"
                                 or self.exp_type == "fvt"
                                 or self.exp_type == "dynamic_bpe"
+                                or self.exp_type == "dynamic_bpe_entropy_split"
                             ):
                                 tokens = ["<s>"] + pretokenize(
                                     batch_example, self.tokenizer

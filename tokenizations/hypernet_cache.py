@@ -26,7 +26,7 @@ class LRU_Cache:
             device (str): Device to store tensors ('cpu' or 'cuda').
         """
         self.capacity = cache_size
-        assert str(device) == "cuda" or "cuda" in str(device)
+        assert str(device) == "cuda" or "cuda" in str(device) or "mps" in str(device)
         self.emb_size = emb_size
         self.hypernet_preds = torch.zeros(cache_size, emb_size).to(device)
         self.biases = torch.zeros(cache_size, 1).to(device)

@@ -16,8 +16,7 @@ import random
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-from split_utils import process_prompts_with_split, process_prompts_with_random_split, minimal_split
-from collections import defaultdict
+from split_utils import process_prompts_with_split, minimal_split
 
 from zett.utils import get_surface_form_matrix
 
@@ -308,7 +307,7 @@ def evaluate_model(
         raise NotImplementedError(
             f"evaluate_model only supports eval_type='original'; got {args.eval_type!r}."
         )
-    
+
     if args.exp_type == "plain":
         return _evaluate_plain(dataloader, model, tokenizer, args)
     if args.exp_type in ("original_tk_hypernet", "lp_tk_hypernet", "dynamic_bpe"):
@@ -378,9 +377,6 @@ def _evaluate_plain(dataloader, model, tokenizer, args):
     total_correct = 0
     total_seen = 0
 
-    if args.split_threshold:
-        print(f'running with threshold={args.split_threshold}')
-        
     latency = LatencyTracker()
     latency.start()
 
@@ -395,20 +391,9 @@ def _evaluate_plain(dataloader, model, tokenizer, args):
                         model=model,
                         tokenizer=tokenizer,
                         prompts=prompts,
-                        split_fn=minimal_split,
-                        entropy_threshold=args.split_threshold,
+                        split_fn=minimal_split, # Or whichever split_fn you chose
+                        entropy_threshold=4.0,
                         device=device
-                    )
-                    enc = tokenizer.pad(
-                        {"input_ids": [torch.tensor(ids) for ids in processed_input_ids_list]},
-                        padding=True,
-                        return_tensors="pt"
-                    ).to(device)
-                elif(args.random_split):
-                    processed_input_ids_list = process_prompts_with_random_split(
-                        tokenizer=tokenizer,
-                        prompts=prompts,
-                        split_fn=minimal_split, 
                     )
                     enc = tokenizer.pad(
                         {"input_ids": [torch.tensor(ids) for ids in processed_input_ids_list]},
@@ -434,9 +419,6 @@ def _evaluate_plain(dataloader, model, tokenizer, args):
                 last_logits = logits[:, -1, :]
                 choice_logits = last_logits[:, choice_token_ids]
                 preds = choice_logits.argmax(dim=-1).tolist()
-
-                torch.cuda.synchronize() # Ensure GPU kernels finished
-                total_inference_time += (time.time() - t1)
 
                 for pred, gold, subj in zip(preds, gold_indices, subjects_in_batch):
                     correct = int(pred == gold)
@@ -572,125 +554,3 @@ def _evaluate_hypernet(
     latency.stop()
     latency.report(args, total_seen, label="mmlu")
     return _print_and_log(args, total_correct, total_seen, correct_per_subject, total_per_subject)
-
-def evaluate_plain_split_divergence(dataloader, model, tokenizer, args, subject=None):
-    """
-    Evaluate MMLU questions across different splitting thresholds and identify
-    questions where model predictions diverge based on threshold.
-    
-    Args:
-        dataloader: DataLoader for MMLU dataset
-        model: Model for inference
-        tokenizer: Tokenizer for the model
-        args: Arguments object (must include max_len)
-        subject: Optional subject filter; if provided, only evaluate questions from this subject
-    
-    Outputs to stdout:
-        - Questions where predictions diverge across thresholds
-        - How each threshold splits the tokens
-    """
-    device = next(model.parameters()).device
-    model.eval()
-    
-    prev_padding_side = tokenizer.padding_side
-    tokenizer.padding_side = "left"
-    
-    choice_token_ids = torch.tensor(
-        [_letter_token_id(tokenizer, L) for L in ("A", "B", "C", "D")], device=device
-    )
-    
-    thresholds = [1, 2, 3, 4, 7, 10]
-    divergent_questions = []
-    
-    try:
-        with torch.no_grad():
-            for batch_idx, batch in enumerate(dataloader):
-                prompts, choices, gold_indices, _, _, subjects_in_batch = batch
-                
-                # Filter by subject if specified
-                if subject is not None:
-                    filtered_indices = [i for i, s in enumerate(subjects_in_batch) if s == subject]
-                    if not filtered_indices:
-                        continue
-                    prompts = [prompts[i] for i in filtered_indices]
-                    choices = [choices[i] for i in filtered_indices]
-                    gold_indices = [gold_indices[i] for i in filtered_indices]
-                    subjects_in_batch = [subjects_in_batch[i] for i in filtered_indices]
-                
-                # For each question, run with all thresholds
-                for q_idx, (prompt, choice_list, gold_idx, subj) in enumerate(
-                    zip(prompts, choices, gold_indices, subjects_in_batch)
-                ):
-                    predictions_by_threshold = {}
-                    splits_by_threshold = {}
-                    
-                    # Run inference for each threshold
-                    for threshold in thresholds:
-                        # Process prompt with split
-                        processed_input_ids_list = process_prompts_with_split(
-                            model=model,
-                            tokenizer=tokenizer,
-                            prompts=[prompt],
-                            split_fn=minimal_split,
-                            entropy_threshold=threshold,
-                            device=device
-                        )
-                        
-                        # Tokenize and pad
-                        enc = tokenizer.pad(
-                            {"input_ids": [torch.tensor(ids) for ids in processed_input_ids_list]},
-                            padding=True,
-                            return_tensors="pt"
-                        ).to(device)
-                        
-                        # Get prediction
-                        logits = model(**enc).logits
-                        last_logits = logits[:, -1, :]
-                        choice_logits = last_logits[:, choice_token_ids]
-                        pred = choice_logits.argmax(dim=-1).item()
-                        
-                        predictions_by_threshold[threshold] = pred
-                        
-                        # Store split information (how many tokens after split)
-                        splits_by_threshold[threshold] = len(processed_input_ids_list[0])
-                    
-                    # Check if predictions diverge
-                    unique_predictions = set(predictions_by_threshold.values())
-                    if len(unique_predictions) > 1:
-                        # Found a divergent question
-                        divergent_questions.append({
-                            'prompt': prompt,
-                            'subject': subj,
-                            'gold_answer': chr(65 + gold_idx),
-                            'predictions': predictions_by_threshold,
-                            'splits': splits_by_threshold,
-                        })
-    finally:
-        tokenizer.padding_side = prev_padding_side
-    
-    # Output divergent questions
-    if divergent_questions:
-        print("\n" + "="*80)
-        print(f"SPLITTING THRESHOLD DIVERGENCE ANALYSIS ({subject or 'ALL SUBJECTS'})")
-        print("="*80)
-        
-        for i, item in enumerate(divergent_questions):
-            print(f"\n[Question {i+1}]")
-            print(f"Subject: {item['subject']}")
-            print(f"Gold Answer: {item['gold_answer']}")
-            print(f"\nQuestion Text:")
-            print(f"{item['prompt']}")
-            print(f"\nPredictions by Threshold:")
-            for threshold in thresholds:
-                pred = item['predictions'][threshold]
-                pred_letter = chr(65 + pred)
-                split_length = item['splits'][threshold]
-                print(f"  Threshold {threshold:2d}: Prediction={pred_letter} | Token Count={split_length}")
-            
-            print("-" * 80)
-    else:
-        print("\n" + "="*80)
-        print(f"NO DIVERGENCES FOUND ({subject or 'ALL SUBJECTS'})")
-        print("="*80 + "\n")
-    
-    return divergent_questions
