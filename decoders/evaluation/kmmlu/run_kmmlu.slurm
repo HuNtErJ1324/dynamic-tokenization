@@ -27,6 +27,8 @@ cd "$PROJECT_ROOT"
 mkdir -p "$PROJECT_ROOT/logs"
 
 # --- env ---------------------------------------------------------------------
+# IMPORTANT: submit from a shell where conda has NOT been loaded — sbatch
+# inherits the submitter's env, so a pre-loaded conda makes module load fail.
 module load conda
 conda activate dyntok
 

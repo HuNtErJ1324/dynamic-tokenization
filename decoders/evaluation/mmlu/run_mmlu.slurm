@@ -27,9 +27,11 @@ cd "$PROJECT_ROOT"
 mkdir -p "$PROJECT_ROOT/logs"
 
 # --- env ---------------------------------------------------------------------
-# Conda is already in the inherited login env on Tillicum; just enable `conda activate`
-# in this non-interactive shell and switch to the project env.
-module load dyntok
+# IMPORTANT: submit this script from a shell where conda has NOT been loaded
+# (i.e. don't `module load conda` before `sbatch`/`bash scripts/run_suite.sh`).
+# sbatch inherits the submitter's env by default, so a pre-loaded conda would
+# make this `module load conda` fail with "Conda is already active".
+module load conda
 conda activate dyntok
 
 # Avoid HF tokenizers parallelism warning under DataLoader
