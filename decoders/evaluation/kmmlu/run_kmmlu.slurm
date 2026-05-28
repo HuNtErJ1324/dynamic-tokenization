@@ -27,9 +27,12 @@ cd "$PROJECT_ROOT"
 mkdir -p "$PROJECT_ROOT/logs"
 
 # --- env ---------------------------------------------------------------------
-# IMPORTANT: submit from a shell where conda has NOT been loaded — sbatch
-# inherits the submitter's env, so a pre-loaded conda makes module load fail.
-module load conda
+# Only `module load conda` if it isn't already inherited from the submitter.
+# sbatch --export=ALL (the default) means CONDA_PREFIX may already be set,
+# which would make a fresh module load error with "Conda is already active".
+if [[ -z "${CONDA_PREFIX:-}" ]]; then
+    module load conda
+fi
 conda activate dyntok
 
 export TOKENIZERS_PARALLELISM=false

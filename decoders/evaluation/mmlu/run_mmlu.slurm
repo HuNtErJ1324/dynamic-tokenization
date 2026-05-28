@@ -27,11 +27,13 @@ cd "$PROJECT_ROOT"
 mkdir -p "$PROJECT_ROOT/logs"
 
 # --- env ---------------------------------------------------------------------
-# IMPORTANT: submit this script from a shell where conda has NOT been loaded
-# (i.e. don't `module load conda` before `sbatch`/`bash scripts/run_suite.sh`).
-# sbatch inherits the submitter's env by default, so a pre-loaded conda would
-# make this `module load conda` fail with "Conda is already active".
-module load conda
+# Only `module load conda` if it isn't already loaded. sbatch defaults to
+# --export=ALL, so if the submitter had conda loaded interactively, CONDA_PREFIX
+# will already be set here and a fresh `module load conda` would error with
+# "Conda is already active".
+if [[ -z "${CONDA_PREFIX:-}" ]]; then
+    module load conda
+fi
 conda activate dyntok
 
 # Avoid HF tokenizers parallelism warning under DataLoader

@@ -62,7 +62,9 @@ read_m30() {
         echo "        Run: python decoders/evaluation/compute_m30.py" >&2
         exit 1
     fi
-    python -c "import json; print(int(json.load(open(r'$f'))['m30']))"
+    # Use python3 (always available on Tillicum login nodes) so the launcher works
+    # without needing `module load conda` first — keeps the submitter env clean.
+    python3 -c "import json; print(int(json.load(open(r'$f'))['m30']))"
 }
 
 # --- helper: submit one cell ------------------------------------------------
