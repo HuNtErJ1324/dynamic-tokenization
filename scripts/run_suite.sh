@@ -83,8 +83,10 @@ submit_cell() {
         exit 1
     fi
 
-    # Compose the env-var prefix for this cell.
+    # Compose the env-var prefix for this cell. PROJECT_ROOT is forwarded so the
+    # slurm script doesn't fall back to $SCRATCH/... (which isn't set on Tillicum).
     local envs=(
+        "PROJECT_ROOT=$PROJECT_ROOT"
         "EXP_TYPE=$exp_type"
         "MERGES=$merges"
         "BOUNDARY=$boundary"

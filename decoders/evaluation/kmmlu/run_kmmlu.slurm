@@ -20,7 +20,8 @@
 set -euo pipefail
 
 # --- paths -------------------------------------------------------------------
-PROJECT_ROOT="${PROJECT_ROOT:-$SCRATCH/dynamic-tokenization}"
+# Root of the repo on the HPC (the directory containing tokenizations/, encoders/, decoders/).
+PROJECT_ROOT="${PROJECT_ROOT:-/gpfs/projects/stf/dyntok/dynamic-tokenization}"
 
 cd "$PROJECT_ROOT"
 mkdir -p "$PROJECT_ROOT/logs"
@@ -30,11 +31,6 @@ module load conda
 conda activate dyntok
 
 export TOKENIZERS_PARALLELISM=false
-
-# Optional: cache HF datasets/models on fast local scratch instead of $HOME
-# export HF_HOME="$SCRATCH/hf_cache"
-# export TRANSFORMERS_CACHE="$HF_HOME"
-# export HF_DATASETS_CACHE="$HF_HOME/datasets"
 
 nvidia-smi || true
 python -c "import torch; print('cuda:', torch.cuda.is_available(), 'device count:', torch.cuda.device_count())"

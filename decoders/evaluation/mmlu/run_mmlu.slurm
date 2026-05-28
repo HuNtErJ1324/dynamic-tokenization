@@ -35,11 +35,6 @@ conda activate dyntok
 # Avoid HF tokenizers parallelism warning under DataLoader
 export TOKENIZERS_PARALLELISM=false
 
-# Optional: cache HF datasets/models on fast local scratch instead of $HOME
-# export HF_HOME="$SCRATCH/hf_cache"
-# export TRANSFORMERS_CACHE="$HF_HOME"
-# export HF_DATASETS_CACHE="$HF_HOME/datasets"
-
 # Optional: wandb login (or `wandb login` once on a login node)
 # export WANDB_API_KEY=...
 # export WANDB_MODE=offline   # if compute nodes have no internet
