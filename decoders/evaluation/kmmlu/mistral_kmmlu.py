@@ -32,7 +32,15 @@ from tokenizations.hypernet_cache import LRU_Cache
 def main():
     parser = argparse.ArgumentParser(description="Running KMMLU Evaluation")
     parser.add_argument("--ds_subject", type=str, default="all", help="KMMLU subject config to use, or 'all' to concatenate every subject.")
-    parser.add_argument("--exp_type", type=str, default="plain", help="plain | original_tk_hypernet | lp_tk_hypernet | dynamic_bpe")
+    parser.add_argument(
+        "--exp_type",
+        type=str,
+        default="plain",
+        help=(
+            "plain | original_tk_hypernet | lp_tk_hypernet | dynamic_bpe | "
+            "entropy_split | dynamic_bpe_entropy_split"
+        ),
+    )
     parser.add_argument("--verbose", type=bool, default=False, help="Add extra loggings.")
     parser.add_argument("--eval_type", type=str, default="original", help="Original (compare with probs of A, B, C or D)")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size to use during evaluation")
@@ -59,6 +67,12 @@ def main():
         help="SuperBPE two-stage schedule: first N merges use strict 'pretokens' boundary, "
              "remainder use --bpe_tokenizer_boundary. 0 disables the warm-up phase.",
     )
+    parser.add_argument(
+        "--entropy_threshold",
+        type=float,
+        default=3.0,
+        help="Entropy threshold for entropy_split and dynamic_bpe_entropy_split.",
+    )
 
     args = parser.parse_args()
     setup_seed(1234)
@@ -84,7 +98,13 @@ def main():
     source_embeddings = None
     datasetEncoder = None
     inout_1M_embeddings = None
-    if args.exp_type in ["original_tk_hypernet", "lp_tk_hypernet", "dynamic_bpe", "word_tk_hypere"]:
+    if args.exp_type in [
+        "original_tk_hypernet",
+        "lp_tk_hypernet",
+        "dynamic_bpe",
+        "word_tk_hypere",
+        "dynamic_bpe_entropy_split",
+    ]:
         hypernet = AutoModel.from_pretrained("benjamin/zett-hypernetwork-Mistral-7B-v0.1", trust_remote_code=True).to(device)
         tokenizer = AutoTokenizer.from_pretrained("benjamin/zett-hypernetwork-Mistral-7B-v0.1")
         if args.exp_type == "lp_tk_hypernet":

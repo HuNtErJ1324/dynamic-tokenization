@@ -9,7 +9,9 @@ HAERAE-HUB/KMMLU dataset schema (columns: question, A, B, C, D, answer
 
 import time
 import statistics
+import sys
 import torch
+from pathlib import Path
 from typing import List, Tuple
 import random
 import numpy as np
@@ -17,6 +19,12 @@ import torch
 from torch.utils.data import Dataset
 
 from zett.utils import get_surface_form_matrix
+
+# Reuse split helpers from the MMLU eval module to keep behavior identical.
+_REPO_ROOT = str(Path(__file__).resolve().parents[3])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+from decoders.evaluation.mmlu.split_utils import process_prompts_with_split, minimal_split
 
 
 # Subjects available as configs in HAERAE-HUB/KMMLU.
@@ -107,6 +115,67 @@ class LatencyTracker:
 def _cuda_sync(device: torch.device):
     if device.type == "cuda":
         torch.cuda.synchronize(device)
+
+
+class _TokenLengthAccumulator:
+    """Streams token-length stats across batches (mirrors MMLU version)."""
+
+    def __init__(self, hn_maxlen: int = 7):
+        self.hn_maxlen = hn_maxlen
+        self.n = 0
+        self.sum_len = 0
+        self.max_len = 0
+        self.n_gt_maxlen = 0
+        self._lengths: list[int] = []
+
+    def update(self, batch_tokens) -> None:
+        skip = {"<pad>", "<s>", "</s>"}
+        for seq in batch_tokens:
+            for tok in seq:
+                if tok in skip:
+                    continue
+                L = len(tok)
+                self.n += 1
+                self.sum_len += L
+                if L > self.max_len:
+                    self.max_len = L
+                if L > self.hn_maxlen:
+                    self.n_gt_maxlen += 1
+                self._lengths.append(L)
+
+    def summary(self) -> dict:
+        if self.n == 0:
+            return {"n": 0}
+        s = sorted(self._lengths)
+        p95_idx = max(0, int(round(0.95 * len(s))) - 1)
+        return {
+            "n": self.n,
+            "mean": self.sum_len / self.n,
+            "max": self.max_len,
+            "p95": s[p95_idx],
+            "frac_gt_hn_maxlen": self.n_gt_maxlen / self.n,
+            "hn_maxlen": self.hn_maxlen,
+        }
+
+
+def _report_token_length_stats(stats: dict, label: str, args) -> None:
+    if stats.get("n", 0) == 0:
+        return
+    print(
+        f"[{label}] merged-token byte length: "
+        f"n={stats['n']}, mean={stats['mean']:.2f}, p95={stats['p95']}, "
+        f"max={stats['max']}, frac>{stats['hn_maxlen']}={stats['frac_gt_hn_maxlen']:.4f}",
+        flush=True,
+    )
+    if not args.no_wandb:
+        import wandb
+        wandb.log({
+            f"token_length/{label}/n": stats["n"],
+            f"token_length/{label}/mean": stats["mean"],
+            f"token_length/{label}/max": stats["max"],
+            f"token_length/{label}/p95": stats["p95"],
+            f"token_length/{label}/frac_gt_hn_maxlen": stats["frac_gt_hn_maxlen"],
+        })
 
 
 def get_hn_embeddings_for_tokens(
@@ -365,9 +434,22 @@ def evaluate_model(
         )
 
     if args.exp_type == "plain":
-        return _evaluate_plain(dataloader, model, tokenizer, args)
+        return _evaluate_plain(dataloader, model, tokenizer, args, do_split=False)
+    if args.exp_type == "entropy_split":
+        return _evaluate_plain(dataloader, model, tokenizer, args, do_split=True)
     if args.exp_type in ("original_tk_hypernet", "lp_tk_hypernet", "dynamic_bpe"):
         return _evaluate_hypernet(
+            dataloader=dataloader,
+            model=model,
+            tokenizer=tokenizer,
+            args=args,
+            hypernet=hypernet,
+            lang_index=lang_index,
+            source_embeddings=source_embeddings,
+            datasetEncoder=datasetEncoder,
+        )
+    if args.exp_type == "dynamic_bpe_entropy_split":
+        return _evaluate_dynamic_bpe_entropy_split(
             dataloader=dataloader,
             model=model,
             tokenizer=tokenizer,
@@ -414,7 +496,13 @@ def _print_and_log(args, total_correct, total_seen, correct_per_subject, total_p
     return overall_acc, per_subject_acc
 
 
-def _evaluate_plain(dataloader, model, tokenizer, args):
+def _evaluate_plain(dataloader, model, tokenizer, args, do_split: bool = False):
+    """
+    Vanilla KMMLU scoring on Mistral's native tokenization.
+
+    If do_split=True (i.e., exp_type='entropy_split'), runs entropy-driven prompt
+    re-tokenization using args.entropy_threshold before scoring.
+    """
     from collections import defaultdict
 
     device = next(model.parameters()).device
@@ -422,6 +510,9 @@ def _evaluate_plain(dataloader, model, tokenizer, args):
 
     prev_padding_side = tokenizer.padding_side
     tokenizer.padding_side = "left"
+
+    do_split = bool(do_split or getattr(args, "split", False))
+    entropy_threshold = float(getattr(args, "entropy_threshold", 3.0))
 
     choice_token_ids = torch.tensor(
         [_letter_token_id(tokenizer, L) for L in ("A", "B", "C", "D")], device=device
@@ -441,13 +532,28 @@ def _evaluate_plain(dataloader, model, tokenizer, args):
                 prompts, _, gold_indices, _, _, subjects_in_batch = batch
 
                 t0 = time.perf_counter()
-                enc = tokenizer(
-                    prompts,
-                    return_tensors="pt",
-                    padding=True,
-                    truncation=True,
-                    max_length=args.max_len,
-                ).to(device)
+                if do_split:
+                    processed_input_ids_list = process_prompts_with_split(
+                        model=model,
+                        tokenizer=tokenizer,
+                        prompts=prompts,
+                        split_fn=minimal_split,
+                        entropy_threshold=entropy_threshold,
+                        device=device,
+                    )
+                    enc = tokenizer.pad(
+                        {"input_ids": [torch.tensor(ids) for ids in processed_input_ids_list]},
+                        padding=True,
+                        return_tensors="pt",
+                    ).to(device)
+                else:
+                    enc = tokenizer(
+                        prompts,
+                        return_tensors="pt",
+                        padding=True,
+                        truncation=True,
+                        max_length=args.max_len,
+                    ).to(device)
                 _cuda_sync(device)
                 latency.encode_times.append(time.perf_counter() - t0)
 
@@ -532,6 +638,7 @@ def _evaluate_hypernet(
     total_per_subject = defaultdict(int)
     total_correct = 0
     total_seen = 0
+    tok_len_acc = _TokenLengthAccumulator(hn_maxlen=getattr(args, "surface_form_maxlen", 7))
 
     latency = LatencyTracker()
     latency.start()
@@ -549,6 +656,8 @@ def _evaluate_hypernet(
             )
             inputs_embeds = encoded["inputs_embeds"].to(torch.bfloat16)
             attention_mask = encoded["attention_mask"]
+            if "batch_tokens" in encoded:
+                tok_len_acc.update(encoded["batch_tokens"])
             _cuda_sync(device)
             latency.encode_times.append(time.perf_counter() - t0)
 
@@ -581,4 +690,251 @@ def _evaluate_hypernet(
 
     latency.stop()
     latency.report(args, total_seen, label="kmmlu")
+    _report_token_length_stats(tok_len_acc.summary(), label="kmmlu", args=args)
     return _print_and_log(args, total_correct, total_seen, correct_per_subject, total_per_subject)
+
+
+# ─── dynamic_bpe + entropy split (multiple-choice variant) ────────────────────
+# Helpers below mirror decoders/evaluation/mmlu/evaluation_utils.py. Keep them
+# in sync; if you change one, change the other.
+
+def _build_gpt2_byte_decoder():
+    bs = (
+        list(range(ord("!"), ord("~") + 1))
+        + list(range(ord("¡"), ord("¬") + 1))
+        + list(range(ord("®"), ord("ÿ") + 1))
+    )
+    cs = bs[:]
+    n = 0
+    for b in range(2 ** 8):
+        if b not in bs:
+            bs.append(b)
+            cs.append(2 ** 8 + n)
+            n += 1
+    return {chr(c): b for b, c in zip(bs, cs)}
+
+
+_GPT2_BYTE_DECODER = _build_gpt2_byte_decoder()
+_GPT2_BYTE_ENCODER = {b: c for c, b in _GPT2_BYTE_DECODER.items()}
+
+
+def _gpt2_decode(tok: str):
+    t = tok.replace("Ġ", " ").replace("▁", " ")
+    try:
+        bts = bytes([_GPT2_BYTE_DECODER.get(c, ord(c) & 0xFF) for c in t])
+        return bts.decode("utf-8")
+    except (UnicodeDecodeError, KeyError):
+        return None
+
+
+def _gpt2_encode_text(text: str) -> str:
+    return "".join(_GPT2_BYTE_ENCODER[b] for b in text.encode("utf-8"))
+
+
+def _char_level_split(tok: str) -> List[str]:
+    text = _gpt2_decode(tok)
+    if text is None:
+        return [tok]
+    chars = list(text)
+    if len(chars) <= 1:
+        return [tok]
+    result = []
+    i = 0
+    if chars[0] == " " and len(chars) > 1:
+        result.append(_gpt2_encode_text(" " + chars[1]))
+        i = 2
+    while i < len(chars):
+        result.append(_gpt2_encode_text(chars[i]))
+        i += 1
+    return result if result else [tok]
+
+
+def _build_embeds_from_tokens(new_batch_tokens, datasetEncoder, tokenizer, max_len, device):
+    unique_tokens = set()
+    for seq in new_batch_tokens:
+        unique_tokens.update(seq)
+    unique_tokens.add(tokenizer.pad_token)
+
+    datasetEncoder.compute_tokens_batch_embeddings(unique_tokens, task="mmlu")
+    hp = datasetEncoder.embeddings_cache.hypernet_preds
+    t2i = datasetEncoder.embeddings_cache.token2idx
+    emb_size = datasetEncoder.embeddings_cache.emb_size
+
+    max_seq_len = min(max_len, max(len(seq) for seq in new_batch_tokens))
+    batch_size = len(new_batch_tokens)
+    inputs_embeds = torch.zeros(batch_size, max_seq_len, emb_size, dtype=torch.bfloat16, device=device)
+    attention_mask = torch.zeros(batch_size, max_seq_len, dtype=torch.long, device=device)
+
+    for i, tokens_seq in enumerate(new_batch_tokens):
+        seq = tokens_seq[-max_seq_len:]
+        pad_len = max_seq_len - len(seq)
+        for j, tok in enumerate(seq):
+            if tok in t2i:
+                inputs_embeds[i, pad_len + j] = hp[t2i[tok]]
+        attention_mask[i, pad_len:pad_len + len(seq)] = 1
+
+    return inputs_embeds, attention_mask
+
+
+def _evaluate_dynamic_bpe_entropy_split(
+    dataloader,
+    model,
+    tokenizer,
+    args,
+    hypernet,
+    lang_index,
+    source_embeddings,
+    datasetEncoder,
+):
+    """KMMLU MC-scoring variant of dynamic_bpe + entropy_split. See MMLU version."""
+    from collections import defaultdict
+    from transformers import AutoTokenizer
+
+    device = next(model.parameters()).device
+    model.eval()
+
+    H = model.config.hidden_size
+    base_input_emb = source_embeddings[:, :H]
+    base_output_emb = source_embeddings[:, H:]
+
+    entropy_threshold = float(getattr(args, "entropy_threshold", 3.0))
+    special_tokens = set(tokenizer.all_special_tokens)
+
+    if args.use_original_emb_for_choices:
+        original_tok = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
+        ids = [_letter_token_id(original_tok, L) for L in ("A", "B", "C", "D")]
+        choice_output_emb = base_output_emb[torch.tensor(ids, device=device)]
+    else:
+        from zett.utils import CHARS_TO_BYTES
+        bytes_to_chars = {v: k for k, v in CHARS_TO_BYTES.items()}
+        def _to_bbpe(s: str) -> str:
+            return "".join(bytes_to_chars[b] for b in s.encode("utf-8"))
+        choice_tokens_bbpe = [_to_bbpe(s) for s in (" A", " B", " C", " D")]
+        _, choice_output_emb = get_hn_embeddings_for_tokens(
+            tokens=choice_tokens_bbpe,
+            tokenizer=tokenizer,
+            lang_index=lang_index,
+            hypernet=hypernet,
+            source_embeddings=source_embeddings,
+            device=device,
+            base_input_embeddings=base_input_emb,
+            base_output_embeddings=base_output_emb,
+        )
+    choice_output_emb = choice_output_emb.to(torch.bfloat16)
+
+    correct_per_subject = defaultdict(int)
+    total_per_subject = defaultdict(int)
+    total_correct = 0
+    total_seen = 0
+    total_split = 0
+    total_tokens_considered = 0
+    tok_len_acc_pre = _TokenLengthAccumulator(hn_maxlen=getattr(args, "surface_form_maxlen", 7))
+    tok_len_acc_post = _TokenLengthAccumulator(hn_maxlen=getattr(args, "surface_form_maxlen", 7))
+
+    latency = LatencyTracker()
+    latency.start()
+
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(dataloader):
+            prompts, _, gold_indices, _, _, subjects_in_batch = batch
+
+            t0 = time.perf_counter()
+            encoded = datasetEncoder.encode_examples_unique_tokens_lru(
+                examples=list(prompts),
+                max_length=args.max_len,
+                merges=args.merges,
+                task="mmlu",
+            )
+            inputs_embeds = encoded["inputs_embeds"].to(torch.bfloat16)
+            attention_mask = encoded["attention_mask"]
+            batch_tokens = encoded["batch_tokens"]
+            tok_len_acc_pre.update(batch_tokens)
+            _cuda_sync(device)
+            latency.encode_times.append(time.perf_counter() - t0)
+
+            hidden = model.model(
+                inputs_embeds=inputs_embeds, attention_mask=attention_mask
+            ).last_hidden_state
+            logits = model.lm_head(hidden).float()
+            probs = torch.softmax(logits, dim=-1)
+            entropy_matrix = -(probs * torch.log(probs + 1e-9)).sum(dim=-1).cpu()
+
+            new_batch_tokens = []
+            for i, tokens_seq in enumerate(batch_tokens):
+                attn = attention_mask[i].tolist()
+                pad_offset = attn.index(1) if 1 in attn else 0
+                new_seq = []
+                for j, tok in enumerate(tokens_seq):
+                    pos = pad_offset + j
+                    ent = (
+                        entropy_matrix[i, pos].item()
+                        if pos < entropy_matrix.shape[1]
+                        else 0.0
+                    )
+                    total_tokens_considered += 1
+                    if ent > entropy_threshold and tok not in special_tokens:
+                        sub = _char_level_split(tok)
+                        new_seq.extend(sub)
+                        if len(sub) > 1:
+                            total_split += 1
+                    else:
+                        new_seq.append(tok)
+                new_batch_tokens.append(new_seq)
+            tok_len_acc_post.update(new_batch_tokens)
+
+            t1 = time.perf_counter()
+            new_inputs_embeds, new_attn_mask = _build_embeds_from_tokens(
+                new_batch_tokens, datasetEncoder, tokenizer, args.max_len, device
+            )
+            _cuda_sync(device)
+
+            outputs = model.model(
+                inputs_embeds=new_inputs_embeds,
+                attention_mask=new_attn_mask,
+            )
+            last_hidden = outputs.last_hidden_state[:, -1, :]
+            scores = last_hidden.float() @ choice_output_emb.float().T
+            _cuda_sync(device)
+            latency.forward_times.append(time.perf_counter() - t1)
+
+            preds = scores.argmax(dim=-1).tolist()
+
+            for pred, gold, subj in zip(preds, gold_indices, subjects_in_batch):
+                correct = int(pred == gold)
+                correct_per_subject[subj] += correct
+                total_per_subject[subj] += 1
+                total_correct += correct
+                total_seen += 1
+
+            if batch_idx % 50 == 0:
+                running = total_correct / max(total_seen, 1)
+                split_rate = total_split / max(total_tokens_considered, 1)
+                print(
+                    f"[batch {batch_idx}] running acc = {running:.4f} "
+                    f"({total_correct}/{total_seen}), split_rate={split_rate:.4f}",
+                    flush=True,
+                )
+
+    latency.stop()
+    latency.report(args, total_seen, label="kmmlu_dyn_bpe_entropy_split")
+    _report_token_length_stats(tok_len_acc_pre.summary(), label="kmmlu_pre_split", args=args)
+    _report_token_length_stats(tok_len_acc_post.summary(), label="kmmlu_post_split", args=args)
+    overall, per_subject = _print_and_log(
+        args, total_correct, total_seen, correct_per_subject, total_per_subject
+    )
+    split_rate = total_split / max(total_tokens_considered, 1)
+    print(
+        f"\n[dyn_bpe_entropy_split] entropy_threshold={entropy_threshold:.2f}  "
+        f"split_rate={split_rate:.4f}  "
+        f"({total_split}/{total_tokens_considered} merged tokens re-split)",
+        flush=True,
+    )
+    if not args.no_wandb:
+        import wandb
+        wandb.log({
+            "kmmlu/dyn_bpe_entropy_split/entropy_threshold": entropy_threshold,
+            "kmmlu/dyn_bpe_entropy_split/split_rate": split_rate,
+            "kmmlu/dyn_bpe_entropy_split/total_split": total_split,
+            "kmmlu/dyn_bpe_entropy_split/total_tokens_considered": total_tokens_considered,
+        })
+    return overall, per_subject

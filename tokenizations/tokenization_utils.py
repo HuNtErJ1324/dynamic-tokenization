@@ -166,7 +166,10 @@ class DatasetEncoder:
         merges = self.merges if self.merges is not None else merges
         max_batch_length = 0
         with torch.no_grad():
-            if self.exp_type == "dynamic_bpe" or self.exp_type == "fvt_dynamic_bpe":
+            if self.exp_type in {"dynamic_bpe", "fvt_dynamic_bpe", "dynamic_bpe_entropy_split"}:
+                # All three exp_types need real BPE merges as the first step. The
+                # *_entropy_split variant additionally re-splits high-entropy merged
+                # tokens later, but the merging itself happens here.
                 ner = task == "ner"
                 nli = task == "nli"
                 mmlu = task == "mmlu"

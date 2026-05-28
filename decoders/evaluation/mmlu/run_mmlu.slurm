@@ -51,17 +51,20 @@ python -c "import torch; print('cuda:', torch.cuda.is_available(), 'device count
 # The script does `from evaluation_utils import ...`, so it must run from its own dir.
 cd "$PROJECT_ROOT/decoders/evaluation/mmlu"
 
-# Choose the experiment via env var: plain | original_tk_hypernet | dynamic_bpe
+# Choose the experiment via env var:
+#   plain | original_tk_hypernet | dynamic_bpe | entropy_split | dynamic_bpe_entropy_split
 EXP_TYPE="${EXP_TYPE:-plain}"
-MERGES="${MERGES:-1000}"     # only used by dynamic_bpe
+MERGES="${MERGES:-1000}"     # only used by dynamic_bpe* exp_types
 BATCH_SIZE="${BATCH_SIZE:-4}"
 # Merge boundary for dynamic_bpe: pretokens | word | word_hyphen | sentence | superbpe
 BOUNDARY="${BOUNDARY:-pretokens}"
 # SuperBPE two-stage schedule: first N merges use strict 'pretokens' boundary,
 # remainder use $BOUNDARY. 0 disables the warm-up phase.
 TRANSITION_POINT="${TRANSITION_POINT:-0}"
+# Entropy threshold for entropy_split / dynamic_bpe_entropy_split.
+ENTROPY_THRESHOLD="${ENTROPY_THRESHOLD:-3.0}"
 
-echo "Running MMLU eval: exp_type=$EXP_TYPE, merges=$MERGES, batch_size=$BATCH_SIZE, boundary=$BOUNDARY, transition_point=$TRANSITION_POINT"
+echo "Running MMLU eval: exp_type=$EXP_TYPE, merges=$MERGES, batch_size=$BATCH_SIZE, boundary=$BOUNDARY, transition_point=$TRANSITION_POINT, entropy_threshold=$ENTROPY_THRESHOLD"
 
 # --- latency tracking --------------------------------------------------------
 START_EPOCH=$(date +%s)
@@ -75,6 +78,7 @@ srun python mistral_mmlu.py \
     --merges "$MERGES" \
     --bpe_tokenizer_boundary "$BOUNDARY" \
     --transition_point "$TRANSITION_POINT" \
+    --entropy_threshold "$ENTROPY_THRESHOLD" \
     --five_shot \
     --no_wandb
 

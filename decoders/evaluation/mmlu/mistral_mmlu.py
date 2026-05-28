@@ -28,7 +28,20 @@ from tokenizations.hypernet_cache import LRU_Cache
 def main():
     parser = argparse.ArgumentParser(description="Running MMLU Evaluation")
     parser.add_argument("--ds_subject", type=str, default="all", help="The MMLU subject subset to use for evaluation.")
-    parser.add_argument("--exp_type", type=str, default="plain", help="Choose which type of experiment to use: plain (original tokenization), original_tk_hypernet (HN embeddings), lp_tk_hypernet (longest prefix tokenization), dynamic_bpe (HN embeddings with different number of merges)")
+    parser.add_argument(
+        "--exp_type",
+        type=str,
+        default="plain",
+        help=(
+            "Experiment variant: "
+            "plain (original tokenization) | "
+            "original_tk_hypernet (HN embeddings on original tokenization) | "
+            "lp_tk_hypernet (longest-prefix tokenization w/ HN) | "
+            "dynamic_bpe (HN embeddings + dynamic BPE merges) | "
+            "entropy_split (vanilla tokenization + entropy-driven prompt re-tokenization) | "
+            "dynamic_bpe_entropy_split (dynamic BPE merges, then split high-entropy merged tokens)"
+        ),
+    )
     parser.add_argument("--verbose", type=bool, default=False, help="Add extra loggings.")
     parser.add_argument("--eval_type", type=str, default="origianl", help="Original (compare with probs of A, B, C or D) or Harness (compare with probs of each choice text)")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size to use during evaluation")
@@ -55,7 +68,19 @@ def main():
         help="SuperBPE two-stage schedule: first N merges use strict 'pretokens' boundary, "
              "remainder use --bpe_tokenizer_boundary. 0 disables the warm-up phase.",
     )
-    parser.add_argument("--split", type=bool, default=False, help="Enable entropy-based prompt re-tokenizing")
+    parser.add_argument(
+        "--split",
+        type=bool,
+        default=False,
+        help="DEPRECATED: legacy flag for entropy-based prompt re-tokenizing. "
+             "Prefer --exp_type entropy_split (or dynamic_bpe_entropy_split).",
+    )
+    parser.add_argument(
+        "--entropy_threshold",
+        type=float,
+        default=3.0,
+        help="Entropy threshold for entropy_split and dynamic_bpe_entropy_split.",
+    )
 
     args = parser.parse_args()
     setup_seed(1234)
@@ -82,7 +107,13 @@ def main():
     source_embeddings = None
     datasetEncoder = None
     inout_1M_embeddings = None
-    if args.exp_type in ["original_tk_hypernet", "lp_tk_hypernet", "dynamic_bpe", "word_tk_hypere"]:
+    if args.exp_type in [
+        "original_tk_hypernet",
+        "lp_tk_hypernet",
+        "dynamic_bpe",
+        "word_tk_hypere",
+        "dynamic_bpe_entropy_split",
+    ]:
         hypernet = AutoModel.from_pretrained("benjamin/zett-hypernetwork-Mistral-7B-v0.1", trust_remote_code=True).to(device)
         tokenizer = AutoTokenizer.from_pretrained("benjamin/zett-hypernetwork-Mistral-7B-v0.1")
         if args.exp_type == "lp_tk_hypernet":
