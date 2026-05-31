@@ -19,6 +19,7 @@ cd "$PROJECT_ROOT"
 mkdir -p "$PROJECT_ROOT/logs"
 
 export PATH="/gpfs/scrubbed/kahaby/conda/dyntok/bin:$PATH"
+export PYTHONHOME="/gpfs/scrubbed/kahaby/conda/dyntok"
 
 export TOKENIZERS_PARALLELISM=false
 export HF_HOME="${HF_HOME:-/gpfs/scrubbed/kahaby/hf_cache}"
