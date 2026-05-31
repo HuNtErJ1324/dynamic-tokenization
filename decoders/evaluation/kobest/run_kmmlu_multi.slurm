@@ -17,7 +17,6 @@ PROJECT_ROOT="${PROJECT_ROOT:-/gpfs/projects/stf/kahaby/dynamic-tokenization-mai
 cd "$PROJECT_ROOT"
 
 export PATH="/gpfs/scrubbed/kahaby/conda/dyntok/bin:$PATH"
-export PYTHONHOME="/gpfs/scrubbed/kahaby/conda/dyntok"
 export TOKENIZERS_PARALLELISM=false
 export HF_HOME="${HF_HOME:-/gpfs/scrubbed/kahaby/hf_cache}"
 
