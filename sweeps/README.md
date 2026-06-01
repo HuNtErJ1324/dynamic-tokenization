@@ -26,7 +26,10 @@ python sweeps/generate_specs.py
 # 2) preview a sweep (prints sbatch commands, submits nothing)
 bash scripts/run_sweep.sh sweeps/S2_threshold.tsv
 
-# 3) submit it
+# 3) submit it. Each cell requests WALLTIME (default 1h). The cluster estimates cost
+#    from REQUESTED time, so keep it short for subsample sweeps (the 12h slurm default
+#    over-reserves and trips the account budget). Raise it for full-set runs:
+#    WALLTIME=12:00:00 bash scripts/run_sweep.sh ... --submit
 bash scripts/run_sweep.sh sweeps/S2_threshold.tsv --submit
 
 # 4) after jobs finish: aggregate + plot

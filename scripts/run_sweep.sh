@@ -49,6 +49,11 @@ cd "$PROJECT_ROOT"
 
 OPS_DIR="${OPS_DIR:-$PROJECT_ROOT/data/operating_points}"
 MANIFEST="${MANIFEST:-$PROJECT_ROOT/logs/sweep_manifest.tsv}"
+# Walltime requested per cell. Sweep cells run on a subsample and finish in minutes;
+# the slurm scripts' 12h #SBATCH default over-reserves and blows the account budget
+# (the scheduler estimates cost from REQUESTED --time). Raise it (e.g. WALLTIME=12:00:00)
+# for slow cells or the full-set confirmation runs.
+WALLTIME="${WALLTIME:-01:00:00}"
 mkdir -p "$(dirname "$MANIFEST")"
 
 # --- parse args (spec path + optional --submit, any order) -------------------
@@ -85,7 +90,7 @@ resolve_merges() {
             echo "       Run: python decoders/evaluation/compute_operating_points.py --boundary $bnd" >&2
             exit 1
         fi
-        python3 -c "import json; d=json.load(open(r'$f')); print(int(d['operating_points']['$pct']['merges']))"
+        python3 -c "import json,sys; op=json.load(open(r'$f'))['operating_points']['$pct']; sys.stderr.write('  [clamp] op:$pct unreachable for this boundary; using saturation merges=%s (~%s%% reduction)\n' % (op['merges'], op.get('achieved_reduction_pct'))) if op.get('clamped') else None; print(int(op['merges']))"
     else
         echo "$src"
     fi
@@ -146,7 +151,7 @@ while IFS=$'\t' read -r tag task exp_type merges_source boundary transition_poin
 
     job_name="${task}_${SWEEP_NAME}_${tag}"
     env_str=$(IFS=,; echo "${envs[*]}")
-    cmd="sbatch --job-name=$job_name --export=ALL,$env_str $slurm_script"
+    cmd="sbatch --job-name=$job_name --time=$WALLTIME --export=ALL,$env_str $slurm_script"
 
     printf '[%s/%s/%s] exp=%s merges=%s boundary=%s tp=%s thr=%s bs=%s n=%s split=%s\n' \
         "$SWEEP_NAME" "$tag" "$task" "$exp_type" "$merges" "$boundary" \
@@ -155,7 +160,7 @@ while IFS=$'\t' read -r tag task exp_type merges_source boundary transition_poin
     n_cells=$((n_cells + 1))
 
     if [[ $SUBMIT -eq 1 ]]; then
-        jobid=$(sbatch --job-name="$job_name" --export=ALL,"$env_str" "$slurm_script" | awk '{print $NF}')
+        jobid=$(sbatch --job-name="$job_name" --time="$WALLTIME" --export=ALL,"$env_str" "$slurm_script" | awk '{print $NF}')
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$(date -Iseconds)" "$jobid" "$SWEEP_NAME" "$tag" "$task" "$exp_type" \
             "$merges" "$boundary" "$transition_point" "$threshold" \
@@ -165,7 +170,7 @@ while IFS=$'\t' read -r tag task exp_type merges_source boundary transition_poin
 done < <(tr -d '\r' < "$SPEC")   # tr strips CR so CRLF specs (e.g. authored on Windows) parse cleanly
 
 echo ""
-echo "Sweep '$SWEEP_NAME': $n_cells cell(s)."
+echo "Sweep '$SWEEP_NAME': $n_cells cell(s), --time=$WALLTIME each."
 if [[ $SUBMIT -eq 0 ]]; then
     echo "Preview only — re-run with --submit to queue. Manifest target: $MANIFEST"
 else

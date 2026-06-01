@@ -90,14 +90,21 @@ def compute_operating_points(
 
     merges_to_avg = {int(k): float(v) for k, v in dyn.merges2seqLen.items()}
     baseline = merges_to_avg[0]
-    max_merges = max(merges_to_avg)
+
+    # Compression saturates once no mergeable pairs remain — beyond that, more
+    # "merges" shorten nothing. Find the FEWEST merges that reach the minimum
+    # achievable seq len and clamp unreachable targets to THAT, not the simulator's
+    # ceiling (otherwise we'd emit absurd, un-runnable counts like 99999).
+    min_seq = min(merges_to_avg.values())
+    sat_merges = min(n for n in merges_to_avg if merges_to_avg[n] <= min_seq + 1e-9)
+    max_achievable_reduction = round(100.0 * (1.0 - min_seq / baseline), 2)
 
     def _find_merges(target_seq_len: float) -> tuple[int, float, bool]:
-        """Smallest N whose avg seq len <= target. Clamp to max_merges if unreachable."""
+        """Smallest N whose avg seq len <= target; clamp to the saturation point."""
         for n in sorted(merges_to_avg):
             if merges_to_avg[n] <= target_seq_len:
                 return n, merges_to_avg[n], False
-        return max_merges, merges_to_avg[max_merges], True
+        return sat_merges, merges_to_avg[sat_merges], True
 
     operating_points: dict[str, dict] = {}
     for pct in reductions:
@@ -106,9 +113,10 @@ def compute_operating_points(
         merges, seq_len, clamped = _find_merges(target)
         if clamped:
             print(
-                f"[warn] {task}/{lang}/{boundary}: {pct}% reduction unreachable within "
-                f"{max_merges} merges (min avg seq len {merges_to_avg[max_merges]:.2f} "
-                f"vs target {target:.2f}); clamping to {max_merges} merges.",
+                f"[warn] {task}/{lang}/{boundary}: {pct}% reduction unreachable "
+                f"(max achievable ~{max_achievable_reduction}%); clamping to the "
+                f"saturation point ({sat_merges} merges). Consider dropping this "
+                f"target from --reductions for this boundary.",
                 flush=True,
             )
         operating_points[str(pct)] = {
@@ -126,6 +134,8 @@ def compute_operating_points(
         "boundary": boundary,
         "n_examples": len(prompts_ds),
         "baseline_seq_len": baseline,
+        "max_achievable_reduction_pct": max_achievable_reduction,
+        "saturation_merges": sat_merges,
         "operating_points": operating_points,
         # JSON keys must be strings; consumers re-cast merge counts as int.
         "merges_to_seq_len": {str(k): v for k, v in merges_to_avg.items()},
@@ -198,7 +208,9 @@ def main() -> int:
             )
             print(
                 f"[done] {task}/{lang}/{boundary}: "
-                f"baseline={record['baseline_seq_len']:.2f} tok/ex; {pts}. "
+                f"baseline={record['baseline_seq_len']:.2f} tok/ex; "
+                f"max reduction ~{record['max_achievable_reduction_pct']}% "
+                f"@ {record['saturation_merges']} merges; {pts}. "
                 f"Wrote {out_path}",
                 flush=True,
             )
