@@ -20,6 +20,7 @@ evaluator), so it is intentionally absent here.
 Run:  python sweeps/generate_specs.py
 """
 
+import json
 from pathlib import Path
 
 HEADER = [
@@ -33,6 +34,38 @@ OPS = [10, 20, 30, 40, 50]
 THR = "3.0"        # default entropy threshold for SM in the Pareto sweep
 
 OUT = Path(__file__).resolve().parent
+OPS_DIR = OUT.parent / "data" / "operating_points"
+
+
+def _lang(task):
+    return "en" if task == "mmlu" else "ko"
+
+
+def achievable_ladder(task, boundary, ladder):
+    """Filter a reduction ladder to what's achievable for (task, boundary).
+
+    Reads data/operating_points/ops_<task>_<lang>_<boundary>.json (from
+    compute_operating_points.py) and keeps every achievable target plus the first
+    clamped one (the saturation endpoint), dropping clamped duplicates — e.g. English
+    pretokens (~14% max) collapses {10,20,30,40,50} to {10,20}, while Korean keeps the
+    full range. Falls back to the full ladder (with a warning) if the JSON is absent,
+    so this stays usable before operating points are computed.
+    """
+    path = OPS_DIR / f"ops_{task}_{_lang(task)}_{boundary}.json"
+    if not path.exists():
+        print(f"  [warn] {path.name} missing; keeping full ladder {ladder} "
+              f"(run compute_operating_points.py first for tailored targets).")
+        return list(ladder)
+    ops = json.loads(path.read_text(encoding="utf-8")).get("operating_points", {})
+    kept, seen_clamped = [], False
+    for p in ladder:
+        rec = ops.get(str(p), {})
+        if not rec.get("clamped", False):
+            kept.append(p)
+        elif not seen_clamped:
+            kept.append(p)            # keep one saturation endpoint, drop the rest
+            seen_clamped = True
+    return kept or list(ladder)
 
 
 def row(tag, task, exp, merges, boundary="pretokens", tp=0, thr="-", bs=4, n=N, split="-"):
@@ -53,10 +86,11 @@ def s1():
     for task in TASKS:
         rows.append(row("B1", task, "plain", "0"))                       # baseline
         rows.append(row("B2", task, "original_tk_hypernet", "0"))        # HN, no merge
-        for p in OPS:
-            rows.append(row(f"M_M{p}",     task, "dynamic_bpe",               f"op:{p}", "pretokens"))
+        for p in achievable_ladder(task, "pretokens", OPS):
+            rows.append(row(f"M_M{p}",  task, "dynamic_bpe",               f"op:{p}", "pretokens"))
+            rows.append(row(f"SM_M{p}", task, "dynamic_bpe_entropy_split", f"op:{p}", "pretokens", thr=THR))
+        for p in achievable_ladder(task, "superbpe", OPS):
             rows.append(row(f"U_M{p}",     task, "dynamic_bpe",               f"op:{p}", "superbpe"))
-            rows.append(row(f"SM_M{p}",    task, "dynamic_bpe_entropy_split", f"op:{p}", "pretokens", thr=THR))
             rows.append(row(f"SMsup_M{p}", task, "dynamic_bpe_entropy_split", f"op:{p}", "superbpe",  thr=THR))
     write("S1_pareto.tsv", rows)
 
@@ -80,7 +114,7 @@ def s2():
 def s3():
     rows = []
     for task in TASKS:
-        for p in [20, 30, 40]:
+        for p in achievable_ladder(task, "pretokens", [20, 30, 40]):
             for t in ["2", "3", "4", "6"]:
                 rows.append(row(f"SM_M{p}_t{t}", task, "dynamic_bpe_entropy_split",
                                 f"op:{p}", "pretokens", thr=t))
@@ -127,7 +161,7 @@ def s7():
 def s8():
     rows = []
     for task in TASKS:
-        for p in [20, 30]:
+        for p in achievable_ladder(task, "pretokens", [20, 30]):
             for strat in ["entropy", "random"]:
                 rows.append(row(f"SM_M{p}_{strat}", task, "dynamic_bpe_entropy_split",
                                 f"op:{p}", "pretokens", thr=THR, split=strat))

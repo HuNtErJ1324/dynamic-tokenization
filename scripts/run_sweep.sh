@@ -66,6 +66,10 @@ for arg in "$@"; do
         SPEC="$arg"
     fi
 done
+# Accept a spec name without the .tsv extension too (e.g. "sweeps/S2_threshold").
+if [[ -n "$SPEC" && ! -f "$SPEC" && -f "$SPEC.tsv" ]]; then
+    SPEC="$SPEC.tsv"
+fi
 if [[ -z "$SPEC" || ! -f "$SPEC" ]]; then
     echo "ERROR: pass a sweep spec TSV as an argument (e.g. sweeps/S2_threshold.tsv)" >&2
     exit 1

@@ -20,7 +20,10 @@ python decoders/evaluation/compute_operating_points.py --boundary word
 python decoders/evaluation/compute_operating_points.py --boundary word_hyphen
 python decoders/evaluation/compute_operating_points.py --boundary sentence
 
-# 1) (re)generate the TSV specs
+# 1) (re)generate the TSV specs. Reads the ops JSONs from step 0 and tailors each
+#    boundary's operating points to what's achievable (drops clamped duplicates), so
+#    run this AFTER compute_operating_points. Without the JSONs it falls back to the
+#    full ladder with a warning.
 python sweeps/generate_specs.py
 
 # 2) preview a sweep (prints sbatch commands, submits nothing)
