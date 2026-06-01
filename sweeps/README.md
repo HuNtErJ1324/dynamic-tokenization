@@ -20,6 +20,12 @@ python decoders/evaluation/compute_operating_points.py --boundary word
 python decoders/evaluation/compute_operating_points.py --boundary word_hyphen
 python decoders/evaluation/compute_operating_points.py --boundary sentence
 
+# 0b) one-time: download datasets to local Arrow so jobs run fully offline (avoids HF 429s).
+#     Run ONLINE with a token; writes data/hf_local/, which the eval reads via load_from_disk.
+export HF_TOKEN=hf_xxxxxxxx
+python scripts/precache_data.py
+#     then submit with HF_HUB_OFFLINE=1 (covers the cached model + zett hypernetwork).
+
 # 1) (re)generate the TSV specs. Reads the ops JSONs from step 0 and tailors each
 #    boundary's operating points to what's achievable (drops clamped duplicates), so
 #    run this AFTER compute_operating_points. Without the JSONs it falls back to the

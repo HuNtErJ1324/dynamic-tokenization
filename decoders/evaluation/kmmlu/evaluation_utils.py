@@ -232,7 +232,7 @@ def load_kmmlu_splits(ds_subject: str, max_retries: int = 5, base_backoff: float
     HF Hub occasionally returns 5xx; we retry each per-subject `load_dataset` call with
     exponential backoff so a single transient failure doesn't kill the whole 45-subject job.
     """
-    from datasets import load_dataset, concatenate_datasets
+    from datasets import concatenate_datasets, load_dataset, load_from_disk
 
     def _with_subject(ds, subject):
         if "subject" in ds.column_names:
@@ -259,6 +259,17 @@ def load_kmmlu_splits(ds_subject: str, max_retries: int = 5, base_backoff: float
             f"Failed to load HAERAE-HUB/KMMLU config {subject!r} after {max_retries} attempts"
         ) from last_err
 
+    # Prefer the local Arrow copy written by scripts/precache_data.py
+    # (data/hf_local/kmmlu/<subject>). load_from_disk never touches the Hub, so jobs
+    # run fully offline with zero 429 risk; fall back to the Hub only if it's absent.
+    local_kmmlu = Path(__file__).resolve().parents[3] / "data" / "hf_local" / "kmmlu"
+
+    def _load_subject(subject):
+        p = local_kmmlu / subject
+        if p.exists():
+            return load_from_disk(str(p))
+        return _load_with_retry(subject)
+
     if ds_subject == "all":
         subjects = list(KMMLU_SUBJECTS)
     else:
@@ -272,8 +283,7 @@ def load_kmmlu_splits(ds_subject: str, max_retries: int = 5, base_backoff: float
     dev_parts = []
     per_subject_dev = {}
     for subj in subjects:
-        print(f"Downloading KMMLU subject {subj}", flush=True)
-        ds = _load_with_retry(subj)
+        ds = _load_subject(subj)
         test_parts.append(_with_subject(ds["test"], subj))
         dev = _with_subject(ds["dev"], subj)
         dev_parts.append(dev)

@@ -26,6 +26,9 @@ from __future__ import annotations
 import argparse
 import os
 import time
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _with_retry(fn, label, attempts=5, base=5):
@@ -47,24 +50,50 @@ def main() -> int:
                         help="Also cache the Mistral-7B + zett hypernetwork weights (~14GB).")
     args = parser.parse_args()
 
+    # Precaching MUST run online — refuse if offline mode is on (the classic gotcha:
+    # exporting HF_HUB_OFFLINE=1 for the job submit, then running precache in the same
+    # shell, which downloads nothing).
+    if os.environ.get("HF_HUB_OFFLINE", "0") not in ("0", "", "false", "False") or \
+       os.environ.get("HF_DATASETS_OFFLINE", "0") not in ("0", "", "false", "False"):
+        print("ERROR: HF_HUB_OFFLINE / HF_DATASETS_OFFLINE is set, but precaching needs the "
+              "network. Run:  unset HF_HUB_OFFLINE HF_DATASETS_OFFLINE  then retry.", flush=True)
+        return 1
+
     if not (os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")):
         print("[warn] No HF_TOKEN in env — anonymous requests are aggressively rate-limited. "
               "Create one at https://huggingface.co/settings/tokens and `export HF_TOKEN=...` "
               "before running this.", flush=True)
 
-    from datasets import get_dataset_config_names, load_dataset
+    # Print the exact cache dir so you can confirm the SLURM jobs read the same one
+    # (HF_HOME must be identical, and on shared /gpfs, for login-node caching to reach
+    # compute nodes).
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+        print(f"[cache] HF_HOME={os.environ.get('HF_HOME', '(default)')}  hub_cache={HF_HUB_CACHE}", flush=True)
+    except Exception:
+        pass
 
-    print("== caching cais/mmlu (config 'all') ==", flush=True)
-    _with_retry(lambda: load_dataset("cais/mmlu", "all"), "cais/mmlu")
+    from datasets import DatasetDict, get_dataset_config_names, load_dataset
 
-    print("== caching HAERAE-HUB/KMMLU (all subjects) ==", flush=True)
+    local = REPO_ROOT / "data" / "hf_local"
+    print(f"== datasets -> {local} (eval reads these via load_from_disk: no Hub, fully offline) ==", flush=True)
+
+    print("== cais/mmlu (config 'all') ==", flush=True)
+    mmlu = _with_retry(lambda: load_dataset("cais/mmlu", "all"), "cais/mmlu")
+    if mmlu is not None:
+        DatasetDict({"test": mmlu["test"], "validation": mmlu["validation"]}).save_to_disk(str(local / "mmlu_all"))
+        print(f"  saved -> {local / 'mmlu_all'}", flush=True)
+
+    print("== HAERAE-HUB/KMMLU (all subjects) ==", flush=True)
     subjects = _with_retry(lambda: get_dataset_config_names("HAERAE-HUB/KMMLU"),
                            "KMMLU config list")
     if subjects:
         print(f"  {len(subjects)} subjects", flush=True)
         for i, s in enumerate(subjects, 1):
-            ok = _with_retry(lambda s=s: load_dataset("HAERAE-HUB/KMMLU", s), f"KMMLU/{s}")
-            print(f"  [{i}/{len(subjects)}] {s}: {'ok' if ok is not None else 'FAILED'}", flush=True)
+            ds = _with_retry(lambda s=s: load_dataset("HAERAE-HUB/KMMLU", s), f"KMMLU/{s}")
+            if ds is not None:
+                DatasetDict({"test": ds["test"], "dev": ds["dev"]}).save_to_disk(str(local / "kmmlu" / s))
+            print(f"  [{i}/{len(subjects)}] {s}: {'ok' if ds is not None else 'FAILED'}", flush=True)
     else:
         print("  [FAIL] could not list KMMLU subjects (still throttled?). "
               "Wait ~15 min for the IP limit to clear, then rerun with HF_TOKEN set.", flush=True)
@@ -86,7 +115,8 @@ def main() -> int:
         print("(skipping model weights — pass --models if offline jobs can't find them; "
               "prior decoder runs usually already cached Mistral-7B + zett.)", flush=True)
 
-    print("\nDone. Now submit with:  export HF_TOKEN=...; export HF_HUB_OFFLINE=1; "
+    print(f"\nDone. Datasets saved under {REPO_ROOT / 'data' / 'hf_local'} (read via load_from_disk — "
+          "no Hub access). Submit with:  export HF_HUB_OFFLINE=1 (for the cached model/zett); "
           "bash scripts/run_sweep.sh <spec> --submit", flush=True)
     return 0
 

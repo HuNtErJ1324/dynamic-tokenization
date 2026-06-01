@@ -10,7 +10,7 @@ See argparse section for all argument options.
 """
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoModel
-from datasets import load_dataset
+from datasets import load_dataset, load_from_disk
 import torch
 import argparse
 import sys
@@ -173,13 +173,19 @@ def main():
         "abstract_algebra", "high_school_government_and_politics", "anatomy", "astronomy", "business_ethics", "clinical_knowledge", "college_biology", "college_chemistry", "college_computer_science", "college_mathematics", "college_medicine", "college_physics", "computer_security", "conceptual_physics", "econometrics", "electrical_engineering", "elementary_mathematics", "formal_logic", "global_facts", "high_school_biology", "high_school_chemistry", "high_school_computer_science", "high_school_european_history", "high_school_geography", "high_school_macroeconomics", "high_school_mathematics", "high_school_microeconomics", "high_school_physics", "high_school_psychology", "high_school_statistics", "high_school_us_history", "high_school_world_history", "human_aging", "human_sexuality", "international_law", "jurisprudence", "logical_fallacies", "machine_learning", "management", "marketing", "medical_genetics", "miscellaneous", "moral_disputes", "moral_scenarios", "nutrition", "philosophy", "prehistory", "professional_accounting", "professional_law", "professional_medicine", "professional_psychology", "public_relations", "security_studies", "sociology", "us_foreign_policy", "virology", "world_religions",
     ]
 
-    dataset = load_dataset("cais/mmlu", args.ds_subject)["test"]
+    mmlu_local = Path(HOME_PATH) / "data" / "hf_local" / "mmlu_all"
+    if args.ds_subject == "all" and mmlu_local.exists():
+        # Local Arrow from scripts/precache_data.py — load_from_disk never hits the Hub.
+        _dd = load_from_disk(str(mmlu_local))
+        dataset, validation_dataset = _dd["test"], _dd["validation"]
+    else:
+        dataset = load_dataset("cais/mmlu", args.ds_subject)["test"]
+        validation_dataset = load_dataset("cais/mmlu", args.ds_subject)["validation"]
     if args.max_examples and args.max_examples > 0:
         n_full = len(dataset)
         n = min(args.max_examples, n_full)
         dataset = dataset.shuffle(seed=1234).select(range(n))
         print(f"[subsample] MMLU test: {n}/{n_full} examples (seed=1234)", flush=True)
-    validation_dataset = load_dataset("cais/mmlu", args.ds_subject)["validation"]
     per_subject_validation_datasets = {}
     if args.same_domain_shot:
         max_length = max(8192, args.max_len)
