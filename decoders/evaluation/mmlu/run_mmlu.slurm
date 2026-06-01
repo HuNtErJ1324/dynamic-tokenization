@@ -39,6 +39,14 @@ conda activate dyntok
 # Avoid HF tokenizers parallelism warning under DataLoader
 export TOKENIZERS_PARALLELISM=false
 
+# HuggingFace auth + offline cache. KMMLU jobs enumerate ~45 subject configs, which
+# rate-limits the HF API (HTTP 429) without a token. Pre-cache once with
+# scripts/precache_data.py, then submit with HF_HUB_OFFLINE=1 so jobs read the local
+# cache and never call the API. These inherit from the submitter via --export=ALL.
+export HF_TOKEN="${HF_TOKEN:-}"
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"
+export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-0}"
+
 # Optional: wandb login (or `wandb login` once on a login node)
 # export WANDB_API_KEY=...
 # export WANDB_MODE=offline   # if compute nodes have no internet

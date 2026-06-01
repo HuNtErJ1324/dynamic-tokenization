@@ -37,6 +37,14 @@ conda activate dyntok
 
 export TOKENIZERS_PARALLELISM=false
 
+# HuggingFace auth + offline cache. KMMLU jobs enumerate ~45 subject configs, which
+# rate-limits the HF API (HTTP 429) without a token. Pre-cache once with
+# scripts/precache_data.py, then submit with HF_HUB_OFFLINE=1 so jobs read the local
+# cache and never call the API. These inherit from the submitter via --export=ALL.
+export HF_TOKEN="${HF_TOKEN:-}"
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"
+export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-0}"
+
 nvidia-smi || true
 python -c "import torch; print('cuda:', torch.cuda.is_available(), 'device count:', torch.cuda.device_count())"
 
