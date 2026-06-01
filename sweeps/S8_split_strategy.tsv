@@ -1,0 +1,9 @@
+tag	task	exp_type	merges_source	boundary	transition_point	threshold	batch_size	max_examples	split_strategy
+SM_M20_entropy	mmlu	dynamic_bpe_entropy_split	op:20	pretokens	0	3.0	4	1500	entropy
+SM_M20_random	mmlu	dynamic_bpe_entropy_split	op:20	pretokens	0	3.0	4	1500	random
+SM_M30_entropy	mmlu	dynamic_bpe_entropy_split	op:30	pretokens	0	3.0	4	1500	entropy
+SM_M30_random	mmlu	dynamic_bpe_entropy_split	op:30	pretokens	0	3.0	4	1500	random
+SM_M20_entropy	kmmlu	dynamic_bpe_entropy_split	op:20	pretokens	0	3.0	4	1500	entropy
+SM_M20_random	kmmlu	dynamic_bpe_entropy_split	op:20	pretokens	0	3.0	4	1500	random
+SM_M30_entropy	kmmlu	dynamic_bpe_entropy_split	op:30	pretokens	0	3.0	4	1500	entropy
+SM_M30_random	kmmlu	dynamic_bpe_entropy_split	op:30	pretokens	0	3.0	4	1500	random

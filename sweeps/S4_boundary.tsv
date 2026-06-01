@@ -1,0 +1,11 @@
+tag	task	exp_type	merges_source	boundary	transition_point	threshold	batch_size	max_examples	split_strategy
+M30_pretokens	mmlu	dynamic_bpe	op:30	pretokens	0	-	4	1500	-
+M30_word	mmlu	dynamic_bpe	op:30	word	0	-	4	1500	-
+M30_word_hyphen	mmlu	dynamic_bpe	op:30	word_hyphen	0	-	4	1500	-
+M30_sentence	mmlu	dynamic_bpe	op:30	sentence	0	-	4	1500	-
+M30_superbpe	mmlu	dynamic_bpe	op:30	superbpe	0	-	4	1500	-
+M30_pretokens	kmmlu	dynamic_bpe	op:30	pretokens	0	-	4	1500	-
+M30_word	kmmlu	dynamic_bpe	op:30	word	0	-	4	1500	-
+M30_word_hyphen	kmmlu	dynamic_bpe	op:30	word_hyphen	0	-	4	1500	-
+M30_sentence	kmmlu	dynamic_bpe	op:30	sentence	0	-	4	1500	-
+M30_superbpe	kmmlu	dynamic_bpe	op:30	superbpe	0	-	4	1500	-

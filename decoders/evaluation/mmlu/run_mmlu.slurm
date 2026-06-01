@@ -62,8 +62,12 @@ BOUNDARY="${BOUNDARY:-pretokens}"
 TRANSITION_POINT="${TRANSITION_POINT:-0}"
 # Entropy threshold for entropy_split / dynamic_bpe_entropy_split.
 ENTROPY_THRESHOLD="${ENTROPY_THRESHOLD:-3.0}"
+# If >0, evaluate on a seeded random subsample of this many test examples (cheap sweeps).
+MAX_EXAMPLES="${MAX_EXAMPLES:-0}"
+# Token-split selection for *_entropy_split exp_types: entropy (method) | random (S8 control).
+SPLIT_STRATEGY="${SPLIT_STRATEGY:-entropy}"
 
-echo "Running MMLU eval: exp_type=$EXP_TYPE, merges=$MERGES, batch_size=$BATCH_SIZE, boundary=$BOUNDARY, transition_point=$TRANSITION_POINT, entropy_threshold=$ENTROPY_THRESHOLD"
+echo "Running MMLU eval: exp_type=$EXP_TYPE, merges=$MERGES, batch_size=$BATCH_SIZE, boundary=$BOUNDARY, transition_point=$TRANSITION_POINT, entropy_threshold=$ENTROPY_THRESHOLD, max_examples=$MAX_EXAMPLES, split_strategy=$SPLIT_STRATEGY"
 
 # --- latency tracking --------------------------------------------------------
 START_EPOCH=$(date +%s)
@@ -78,6 +82,8 @@ srun python mistral_mmlu.py \
     --bpe_tokenizer_boundary "$BOUNDARY" \
     --transition_point "$TRANSITION_POINT" \
     --entropy_threshold "$ENTROPY_THRESHOLD" \
+    --max_examples "$MAX_EXAMPLES" \
+    --split_strategy "$SPLIT_STRATEGY" \
     --five_shot \
     --no_wandb
 

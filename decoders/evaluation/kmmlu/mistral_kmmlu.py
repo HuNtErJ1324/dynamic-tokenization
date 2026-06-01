@@ -73,6 +73,22 @@ def main():
         default=3.0,
         help="Entropy threshold for entropy_split and dynamic_bpe_entropy_split.",
     )
+    parser.add_argument(
+        "--max_examples",
+        type=int,
+        default=0,
+        help="If >0, evaluate on a seeded random subsample of this many test examples "
+             "(for cheap hyperparameter sweeps). 0 = full test set.",
+    )
+    parser.add_argument(
+        "--split_strategy",
+        type=str,
+        default="entropy",
+        choices=["entropy", "random"],
+        help="Token-split selection for entropy_split / dynamic_bpe_entropy_split: "
+             "'entropy' (split high-entropy tokens; the method) or 'random' (split a "
+             "random set of the same size; the S8 mechanism control).",
+    )
 
     args = parser.parse_args()
     setup_seed(1234)
@@ -145,6 +161,11 @@ def main():
         )
 
     test_dataset, validation_dataset, per_subject_validation_datasets, subjects_used = load_kmmlu_splits(args.ds_subject)
+    if args.max_examples and args.max_examples > 0:
+        n_full = len(test_dataset)
+        n = min(args.max_examples, n_full)
+        test_dataset = test_dataset.shuffle(seed=1234).select(range(n))
+        print(f"[subsample] KMMLU test: {n}/{n_full} examples (seed=1234)", flush=True)
     if not args.same_domain_shot:
         # match the MMLU script: only build per-subject dev sets when needed
         per_subject_validation_datasets_for_dataset = {}

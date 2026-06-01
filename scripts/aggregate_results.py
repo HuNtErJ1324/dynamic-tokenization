@@ -1,22 +1,28 @@
 """
-Aggregate slurm logs from a run of scripts/run_suite.sh into a single results
-table. Reads the manifest at logs/suite_manifest.tsv (job_id ↔ method ↔ config)
-and pairs every job with its matching slurm log under logs/, parsing the
-stdout for accuracy, latency, and merged-token-length stats.
+Aggregate slurm logs from a run of scripts/run_sweep.sh (or the legacy
+scripts/run_suite.sh) into a single results table. Reads the manifest
+(job_id <-> method <-> config) and pairs every job with its matching slurm log
+under logs/, parsing stdout for accuracy, latency, and merged-token-length stats.
+
+Realized sequence-reduction % is filled in from the operating-point JSONs
+(data/operating_points/ops_*.json) when a row references one via op:<pct> — this
+is the simulated reduction on the operating-point set, used as the x-axis for the
+Pareto plots. Rows with merges=0 (plain / original_tk_hypernet) get 0%.
 
 Outputs:
-  - results/suite_results.csv     — one row per (task, method)
-  - results/suite_results.md      — same content as a Markdown table for the report
+  - results/suite_results.csv     — one row per cell (all columns)
+  - results/suite_results.md      — tighter Markdown table for the report
 
 Usage:
-    python scripts/aggregate_results.py
-    python scripts/aggregate_results.py --manifest path/to/manifest.tsv --logs path/to/logs/
+    python scripts/aggregate_results.py                                   # sweep manifest
+    python scripts/aggregate_results.py --manifest logs/suite_manifest.tsv  # legacy 16-cell suite
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import json
 import re
 from pathlib import Path
 from typing import Optional
@@ -51,11 +57,11 @@ RE_SPLIT_RATE = re.compile(
 
 
 def _read_manifest(path: Path) -> list[dict]:
-    """Read the TSV manifest produced by run_suite.sh --submit."""
+    """Read the TSV manifest produced by run_sweep.sh / run_suite.sh --submit."""
     if not path.exists():
         raise FileNotFoundError(
             f"Manifest not found at {path}. "
-            "Run scripts/run_suite.sh --submit first, or pass --manifest explicitly."
+            "Run scripts/run_sweep.sh --submit first, or pass --manifest explicitly."
         )
     rows = []
     with path.open("r", encoding="utf-8") as f:
@@ -69,18 +75,15 @@ def _find_log(logs_dir: Path, job_id: str) -> Optional[Path]:
     """Find the slurm log for a job id. Looks for *-{job_id}.out under logs_dir."""
     candidates = list(logs_dir.glob(f"*-{job_id}.out"))
     if not candidates:
-        # also try *_{job_id}.out / {job_id}.out as fallbacks
         candidates = list(logs_dir.glob(f"*{job_id}*.out"))
     if not candidates:
         return None
-    # If multiple matches (shouldn't happen), return the most recent.
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
 def _parse_log(path: Path) -> dict:
     """Pull accuracy / latency / token-length stats out of one slurm stdout file."""
     text = path.read_text(encoding="utf-8", errors="replace")
-
     out: dict = {}
 
     if m := RE_ACCURACY.search(text):
@@ -111,7 +114,40 @@ def _parse_log(path: Path) -> dict:
     return out
 
 
-def aggregate(manifest_path: Path, logs_dir: Path) -> list[dict]:
+def _seq_reduction_pct(entry: dict, ops_dir: Path) -> tuple[Optional[float], Optional[float]]:
+    """Best-effort (target, realized) sequence-reduction % for a manifest row.
+
+    For op:<pct>[_<boundary>] rows we read the simulated achieved_reduction_pct
+    from the matching operating-point JSON (proxy for realized reduction). Rows
+    with merges=0 are 0%. Anything else returns (None, None).
+    """
+    op = (entry.get("op") or "").strip()
+    merges = (entry.get("merges") or "").strip()
+
+    if op.startswith("op:"):
+        spec = op[3:]                       # e.g. "30" or "30_superbpe"
+        pct = spec.split("_")[0]
+        boundary = spec.split("_", 1)[1] if "_" in spec else (entry.get("boundary") or "pretokens")
+        task = entry.get("task", "")
+        lang = "en" if task == "mmlu" else "ko"
+        target = float(pct) if pct.replace(".", "", 1).isdigit() else None
+        f = ops_dir / f"ops_{task}_{lang}_{boundary}.json"
+        if f.exists():
+            try:
+                d = json.loads(f.read_text(encoding="utf-8"))
+                rec = d.get("operating_points", {}).get(pct, {})
+                ach = rec.get("achieved_reduction_pct")
+                return target, (float(ach) if ach is not None else target)
+            except Exception:
+                return target, target
+        return target, target
+
+    if merges in ("0", ""):
+        return 0.0, 0.0
+    return None, None
+
+
+def aggregate(manifest_path: Path, logs_dir: Path, ops_dir: Path) -> list[dict]:
     manifest = _read_manifest(manifest_path)
     rows = []
     for entry in manifest:
@@ -122,16 +158,28 @@ def aggregate(manifest_path: Path, logs_dir: Path) -> list[dict]:
         if log_path is not None:
             merged.update(_parse_log(log_path))
         else:
-            print(f"[warn] no log for job_id={job_id} method={entry.get('method')} task={entry.get('task')}", flush=True)
+            print(
+                f"[warn] no log for job_id={job_id} method={entry.get('method')} "
+                f"task={entry.get('task')}",
+                flush=True,
+            )
+        tgt, red = _seq_reduction_pct(entry, ops_dir)
+        if tgt is not None:
+            merged["target_reduction_pct"] = tgt
+        if red is not None:
+            merged["seq_reduction_pct"] = red
         rows.append(merged)
     return rows
 
 
 def write_csv(rows: list[dict], out_path: Path) -> None:
-    # Union all keys to a stable header (manifest columns first, then numeric metrics).
+    # Stable header: manifest/config columns first, then derived + numeric metrics,
+    # then any extra toklen_* keys, then log_path.
     base_cols = [
-        "submitted_at", "job_id", "method", "task", "exp_type", "merges",
-        "boundary", "transition_point", "entropy_threshold",
+        "submitted_at", "job_id", "sweep", "method", "task", "exp_type", "merges",
+        "boundary", "transition_point", "entropy_threshold", "batch_size",
+        "max_examples", "split_strategy", "op",
+        "target_reduction_pct", "seq_reduction_pct",
         "accuracy", "correct", "seen",
         "wall_time_s", "throughput_ex_per_s", "ms_per_example",
         "split_rate", "split_count", "split_total",
@@ -146,77 +194,73 @@ def write_csv(rows: list[dict], out_path: Path) -> None:
             w.writerow({c: r.get(c, "") for c in cols})
 
 
+def _fmt(key: str, val) -> str:
+    if isinstance(val, float):
+        if "accuracy" in key or key == "split_rate" or "frac" in key:
+            return f"{val:.4f}"
+        if "reduction_pct" in key:
+            return f"{val:.1f}"
+        return f"{val:.2f}"
+    return str(val)
+
+
 def write_markdown(rows: list[dict], out_path: Path) -> None:
-    """Tighter Markdown table for the report — just the columns reviewers want."""
+    """Tighter, task-agnostic Markdown table for the report."""
     cols = [
+        ("Sweep", "sweep"),
         ("Method", "method"),
         ("Task", "task"),
         ("exp_type", "exp_type"),
         ("Boundary", "boundary"),
         ("Merges", "merges"),
-        ("Threshold", "entropy_threshold"),
-        ("TP", "transition_point"),
+        ("Thr", "entropy_threshold"),
+        ("Split", "split_strategy"),
+        ("Reduc%", "seq_reduction_pct"),
         ("Accuracy", "accuracy"),
         ("ms/ex", "ms_per_example"),
-        ("p95 byte", "toklen_mmlu_p95"),  # heuristic: MMLU rows; KMMLU rows fall back below
-        ("frac>7B", "toklen_mmlu_frac_gt_hn"),
+        ("split_rate", "split_rate"),
     ]
-
     header = "| " + " | ".join(c[0] for c in cols) + " |"
     sep = "|" + "|".join(["---"] * len(cols)) + "|"
     lines = [header, sep]
-
     for r in rows:
-        # If the row is a KMMLU one, swap the toklen lookup to kmmlu_*.
-        if r.get("task") == "kmmlu":
-            col_overrides = {"toklen_mmlu_p95": "toklen_kmmlu_p95",
-                             "toklen_mmlu_frac_gt_hn": "toklen_kmmlu_frac_gt_hn"}
-        else:
-            col_overrides = {}
-        cells = []
-        for _, key in cols:
-            real_key = col_overrides.get(key, key)
-            val = r.get(real_key, "")
-            if isinstance(val, float):
-                val = f"{val:.4f}" if "accuracy" in real_key or "frac" in real_key else f"{val:.2f}"
-            cells.append(str(val))
+        cells = [_fmt(key, r.get(key, "")) for _, key in cols]
         lines.append("| " + " | ".join(cells) + " |")
-
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def main() -> int:
+    repo_root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--manifest",
         type=Path,
-        default=Path(__file__).resolve().parents[1] / "logs" / "suite_manifest.tsv",
-        help="Path to the suite manifest TSV (default: $PROJECT_ROOT/logs/suite_manifest.tsv).",
+        default=repo_root / "logs" / "sweep_manifest.tsv",
+        help="Path to the manifest TSV (default: logs/sweep_manifest.tsv; "
+        "pass logs/suite_manifest.tsv for the legacy 16-cell suite).",
     )
     parser.add_argument(
         "--logs",
         type=Path,
-        default=Path(__file__).resolve().parents[1] / "logs",
-        help="Directory containing slurm .out files (default: $PROJECT_ROOT/logs).",
+        default=repo_root / "logs",
+        help="Directory containing slurm .out files (default: logs/).",
     )
     parser.add_argument(
-        "--out_csv",
+        "--ops_dir",
         type=Path,
-        default=Path(__file__).resolve().parents[1] / "results" / "suite_results.csv",
+        default=repo_root / "data" / "operating_points",
+        help="Directory with ops_*.json for realized sequence-reduction lookup.",
     )
-    parser.add_argument(
-        "--out_md",
-        type=Path,
-        default=Path(__file__).resolve().parents[1] / "results" / "suite_results.md",
-    )
+    parser.add_argument("--out_csv", type=Path, default=repo_root / "results" / "suite_results.csv")
+    parser.add_argument("--out_md", type=Path, default=repo_root / "results" / "suite_results.md")
     args = parser.parse_args()
 
-    rows = aggregate(args.manifest, args.logs)
+    rows = aggregate(args.manifest, args.logs, args.ops_dir)
     write_csv(rows, args.out_csv)
     write_markdown(rows, args.out_md)
-    print(f"Wrote {len(rows)} rows → {args.out_csv}")
-    print(f"Wrote Markdown summary → {args.out_md}")
+    print(f"Wrote {len(rows)} rows -> {args.out_csv}")
+    print(f"Wrote Markdown summary -> {args.out_md}")
     return 0
 
 

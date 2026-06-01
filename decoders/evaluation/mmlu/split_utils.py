@@ -1,9 +1,31 @@
+import random
 import torch
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+
+def select_split_positions(entropies, threshold, candidate_mask, strategy="entropy", rng=None):
+    """Indices (into the token sequence) to char-split.
+
+    - "entropy": candidate positions whose entropy exceeds `threshold` (the method).
+    - "random":  a random subset of candidate positions of the SAME size as the
+      entropy set, so the split *count* (and hence split_rate) is matched but the
+      selection is entropy-independent. This is the S8 mechanism control: if random
+      performs like entropy, then targeting high-entropy tokens isn't what helps.
+
+    `candidate_mask[i]` marks positions eligible to split (e.g. non-special tokens).
+    Determinism comes from the global seed set in setup_seed(); pass `rng` to override.
+    """
+    rng = rng or random
+    cand = [i for i, ok in enumerate(candidate_mask) if ok]
+    ent_idx = [i for i in cand if entropies[i] > threshold]
+    if strategy == "random":
+        k = min(len(ent_idx), len(cand))
+        return set(rng.sample(cand, k)) if k > 0 else set()
+    return set(ent_idx)
+
 @torch.no_grad()
-def process_prompts_with_split(model, tokenizer, prompts, split_fn, entropy_threshold=3.0, device="cuda", verbose=False):
+def process_prompts_with_split(model, tokenizer, prompts, split_fn, entropy_threshold=3.0, device="cuda", verbose=False, split_strategy="entropy"):
     """
     Takes raw strings, calculates entropy in a single batch,
     and applies a splitting strategy to high-entropy tokens.
@@ -23,27 +45,33 @@ def process_prompts_with_split(model, tokenizer, prompts, split_fn, entropy_thre
     processed_prompts = []
 
     for i, original_ids in enumerate(encoded_prompts):
-        new_prompt = [original_ids[0]]
+        L = len(original_ids)
+        entropies = [entropy_matrix[i, j].item() for j in range(L)]
+        # Candidates = every non-BOS position. The decision (entropy vs random) is
+        # centralized in select_split_positions so the two strategies stay in sync.
+        candidate_mask = [j >= 1 for j in range(L)]
+        split_js = select_split_positions(
+            entropies, entropy_threshold, candidate_mask, strategy=split_strategy
+        )
 
         if verbose:
-            print(f"\n[prompt {i}] threshold={entropy_threshold}")
+            print(f"\n[prompt {i}] threshold={entropy_threshold} strategy={split_strategy}")
             print(f"  {'token':<20} {'entropy':>8}  {'action'}")
             print(f"  {'-'*50}")
 
-        for j in range(1, len(original_ids)):
+        new_prompt = [original_ids[0]]
+        for j in range(1, L):
             next_token_id = original_ids[j]
-            token_text = tokenizer.decode([next_token_id])
-            token_entropy = entropy_matrix[i, j].item()
-            if token_entropy > entropy_threshold:
+            if j in split_js:
                 fragments = split_fn(tokenizer, next_token_id)
                 new_prompt.extend(fragments)
                 if verbose:
                     fragment_texts = [tokenizer.decode([f]) for f in fragments]
-                    print(f"  {repr(token_text):<20} {token_entropy:>8.3f}  SPLIT → {fragment_texts}")
+                    print(f"  {repr(tokenizer.decode([next_token_id])):<20} {entropies[j]:>8.3f}  SPLIT -> {fragment_texts}")
             else:
                 new_prompt.append(next_token_id)
                 if verbose:
-                    print(f"  {repr(token_text):<20} {token_entropy:>8.3f}  keep")
+                    print(f"  {repr(tokenizer.decode([next_token_id])):<20} {entropies[j]:>8.3f}  keep")
 
         if verbose:
             before = [tokenizer.decode([t]) for t in original_ids]

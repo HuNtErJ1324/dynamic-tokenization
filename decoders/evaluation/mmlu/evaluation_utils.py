@@ -16,7 +16,7 @@ import random
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-from split_utils import process_prompts_with_split, minimal_split
+from split_utils import process_prompts_with_split, minimal_split, select_split_positions
 
 from zett.utils import get_surface_form_matrix
 
@@ -516,6 +516,7 @@ def _evaluate_plain(dataloader, model, tokenizer, args, do_split: bool = False):
                         split_fn=minimal_split,
                         entropy_threshold=entropy_threshold,
                         device=device,
+                        split_strategy=getattr(args, "split_strategy", "entropy"),
                     )
                     enc = tokenizer.pad(
                         {"input_ids": [torch.tensor(ids) for ids in processed_input_ids_list]},
@@ -815,6 +816,7 @@ def _evaluate_dynamic_bpe_entropy_split(
     base_output_emb = source_embeddings[:, H:]
 
     entropy_threshold = float(getattr(args, "entropy_threshold", 3.0))
+    split_strategy = getattr(args, "split_strategy", "entropy")
     special_tokens = set(tokenizer.all_special_tokens)
 
     # Choice letter output embeddings (mirrors _evaluate_hypernet).
@@ -884,16 +886,24 @@ def _evaluate_dynamic_bpe_entropy_split(
             for i, tokens_seq in enumerate(batch_tokens):
                 attn = attention_mask[i].tolist()
                 pad_offset = attn.index(1) if 1 in attn else 0
-                new_seq = []
+                ents = []
+                cand_mask = []
                 for j, tok in enumerate(tokens_seq):
                     pos = pad_offset + j
-                    ent = (
+                    ents.append(
                         entropy_matrix[i, pos].item()
                         if pos < entropy_matrix.shape[1]
                         else 0.0
                     )
+                    cand_mask.append(tok not in special_tokens)
+                # entropy vs random selection (S8 control), matched on split count.
+                split_js = select_split_positions(
+                    ents, entropy_threshold, cand_mask, strategy=split_strategy
+                )
+                new_seq = []
+                for j, tok in enumerate(tokens_seq):
                     total_tokens_considered += 1
-                    if ent > entropy_threshold and tok not in special_tokens:
+                    if j in split_js:
                         sub = _char_level_split(tok)
                         new_seq.extend(sub)
                         if len(sub) > 1:
