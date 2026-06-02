@@ -163,6 +163,40 @@ def format_copa(row, answer=None, korean_prompt=False, score_by_text=False):
         prompt += f" {answer}"
     return prompt, gold, [c1, c2]
 
+KOBEST_TASKS = ["copa", "boolq", "wic", "hellaswag", "sentineg"]
+
+def format_kobest(task, row, score_by_text=False):
+    """Universal formatter for all KoBEST tasks. Returns (prompt, gold_idx, choices)."""
+    if task == "copa":
+        return None  # handled separately
+    elif task == "boolq":
+        prompt = f"{row['paragraph']}\n질문: {row['question']}\n정답:"
+        choices = ["예", "아니오"]
+        return prompt, row["label"], choices
+    elif task == "wic":
+        prompt = (f"단어 '{row['word']}'이 두 문장에서 같은 의미로 쓰였나요?\n"
+                  f"문장1: {row['context_1']}\n문장2: {row['context_2']}\n정답:")
+        choices = ["예", "아니오"]
+        return prompt, row["label"], choices
+    elif task == "hellaswag":
+        endings = [row["ending_1"], row["ending_2"], row["ending_3"], row.get("ending_4", "")]
+        choices = [e for e in endings if e]
+        prompt = f"{row['context']}\n다음으로 가장 자연스러운 것은?"
+        return prompt, row["label"], choices
+    elif task == "sentineg":
+        prompt = f"다음 문장의 감정은?\n{row['sentence']}\n정답:"
+        choices = ["부정", "긍정"]
+        return prompt, row["label"], choices
+    raise ValueError(f"Unknown task: {task}")
+
+def load_kobest_task(task, max_examples=None, seed=42):
+    ds = load_dataset("skt/kobest_v1", task)
+    test = ds["test"]
+    val = ds["validation"]
+    if max_examples:
+        test = test.select(range(min(max_examples, len(test))))
+    return test, val
+
 def load_copa(num_shots=5, max_examples=None, seed=42):
     ds = load_dataset("skt/kobest_v1", "copa")
     test = ds["test"]
@@ -323,7 +357,7 @@ def evaluate(
 
     if task == "kmmlu":
         test_ds, val_ds = load_kmmlu(subject=kmmlu_subject, max_examples=max_examples, seed=seed)
-        prefix = ""  # few-shot from dev
+        prefix = ""
         random.seed(seed)
         for row in list(val_ds)[:num_shots]:
             p, g, ch = format_kmmlu(row, score_by_text=score_by_text)
@@ -332,6 +366,13 @@ def evaluate(
             else:
                 full, _, _ = format_kmmlu(row, answer=CHOICE_LABELS[g])
                 prefix += full + "\n\n"
+    elif task in KOBEST_TASKS and task != "copa":
+        test_ds, val_ds = load_kobest_task(task, max_examples=max_examples, seed=seed)
+        prefix = ""
+        random.seed(seed)
+        for row in list(val_ds)[:num_shots]:
+            p, g, ch = format_kobest(task, row)
+            prefix += p + " " + ch[g] + "\n\n"
     else:
         test_ds, val_ds = load_copa(num_shots=num_shots, max_examples=max_examples, seed=seed)
         prefix = build_few_shot_prefix(val_ds, num_shots=num_shots, seed=seed, korean_prompt=korean_prompt, score_by_text=score_by_text)
@@ -346,6 +387,10 @@ def evaluate(
             prompt, gold, choice_texts = format_kmmlu(row, score_by_text=score_by_text)
             full_prompt = prefix + prompt
             choices = choice_texts if score_by_text else ["A", "B", "C", "D"]
+        elif task in KOBEST_TASKS and task != "copa":
+            prompt, gold, choice_texts = format_kobest(task, row)
+            full_prompt = prefix + prompt
+            choices = choice_texts
         else:
             prompt, gold, choice_texts = format_copa(row, korean_prompt=korean_prompt, score_by_text=score_by_text)
             full_prompt = prefix + prompt
