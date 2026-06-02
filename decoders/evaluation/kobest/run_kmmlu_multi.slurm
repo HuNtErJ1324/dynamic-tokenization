@@ -9,6 +9,7 @@
 #SBATCH --mem=200G
 #SBATCH --time=8:00:00
 #SBATCH --qos=normal
+#SBATCH --nodelist=g023
 
 set -euo pipefail
 
